@@ -93,11 +93,10 @@ export const initMediasoup = async (io: any) => {
 
     connections.on("connection", async (socket: Socket) => {
       console.log("new connectiion", socket.id);
-      // connection-success
+
       socket.emit("connection-success", {
         socketId: socket.id,
       });
-      // remove iteam when disconnect
       const removeItems = <
         T extends TransportItem | ProducerItem | ConsumerItem
       >(
@@ -120,7 +119,6 @@ export const initMediasoup = async (io: any) => {
 
         return items;
       };
-      // 
       socket.on("disconnect", () => {
         // do some cleanup
         console.log("peer disconnected", socket.id);
@@ -164,7 +162,6 @@ export const initMediasoup = async (io: any) => {
         // call callback from the client and send back the rtpCapabilities
         callback({ rtpCapabilities });
       });
-      // 
       //
       const createRoom = async (
         roomName: string,
