@@ -13,9 +13,8 @@ export default function VideoCall() {
   const router = useRouter();
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const clientRef = useRef<MediaSoupClientInstance | null>(null);
-  const initialized = useRef(false);
 
-  const [remoteStreams, setRemoteStreams] = useState<{ id: string; stream: MediaStream; kind: 'audio' | 'video' }[]>([]);
+  const [remoteStreams, setRemoteStreams] = useState(new Map<string, MediaStream>());
   const roomName = params.roomName as string;
 
   const [isVideoOn, setIsVideoOn] = useState(true);
@@ -23,42 +22,51 @@ export default function VideoCall() {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const screenShareStreamRef = useRef<MediaStream | null>(null);
 
-  useEffect(() => {
-    if (initialized.current) return;
-    initialized.current = true;
+   useEffect(() => {
+    if (!roomName) return;
 
-    const onLocalStream = (stream: MediaStream) => {
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
-    };
-    
-    // Logic to handle and combine remote streams
-    const onRemoteStream = (id: string, stream: MediaStream, kind: 'audio' | 'video') => {
-      setRemoteStreams(prev => {
-        const existing = prev.find(s => s.id === id && s.kind === kind);
-        if (existing) return prev; // Avoid duplicates
+    const client = mediaSoupClient(roomName, {
+      onLocalStream: (stream) => {
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+      },
+      // ✅ LOGIC FIX: Intelligently combine audio/video into one stream per peer.
+      onRemoteStream: (id, stream, kind) => {
+        setRemoteStreams(prev => {
+          const newPeers = new Map(prev);
+          const peerStream = newPeers.get(id);
+          const track = kind === 'video' ? stream.getVideoTracks()[0] : stream.getAudioTracks()[0];
 
-        // Simple add for now, can be improved to merge streams later if needed
-        return [...prev, { id, stream, kind }];
-      });
-    };
-    
-    const onRemoteStreamRemoved = (id: string) => {
-        setRemoteStreams(prev => prev.filter(s => s.id !== id));
-    };
+          if (!track) return newPeers;
 
-    clientRef.current = mediaSoupClient(roomName, {
-      onLocalStream,
-      onRemoteStream,
-      onRemoteStreamRemoved,
-     
+          if (peerStream) {
+            // If peer's stream already exists, add the new track.
+            peerStream.addTrack(track);
+          } else {
+            // If it's a new peer, create a new MediaStream with the track.
+            const newStream = new MediaStream([track]);
+            newPeers.set(id, newStream);
+          }
+          return newPeers;
+        });
+      },
+      onRemoteStreamRemoved: (id) => {
+        setRemoteStreams(prev => {
+          const newPeers = new Map(prev);
+          newPeers.delete(id);
+          return newPeers;
+        });
+      },
     });
 
+    clientRef.current = client;
+
     return () => {
-      clientRef.current?.cleanup();
+      client.cleanup();
+      clientRef.current = null;
     };
-  }, [roomName, router]);
+  }, [roomName]);
 
   const handleToggleVideo = useCallback(async () => {
     if (!clientRef.current) return;
@@ -125,18 +133,18 @@ export default function VideoCall() {
             </div>
 
             {/* Remote Videos */}
-            {remoteStreams.filter(s => s.kind === 'video').map(({ id, stream }) => (
+            {[...remoteStreams.values()].filter(s => s.getVideoTracks().length > 0).map((stream, id) => (
                 <div key={id} className="relative w-96 h-72">
                     <video
                         ref={(videoEl) => { if (videoEl) videoEl.srcObject = stream; }}
                         autoPlay
                         className="w-full h-full object-cover bg-black rounded-lg"
                     />
-                    <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded">Peer-{id.slice(0, 4)}</div>
+                    <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded">Peer-{String(id).slice(0, 4)}</div>
                 </div>
             ))}
              {/* Remote Audio */}
-            {remoteStreams.filter(s => s.kind === 'audio').map(({ id, stream }) => (
+            {[...remoteStreams.entries()].filter(([, stream]) => stream.getAudioTracks().length > 0).map(([id, stream]) => (
                 <audio key={id} ref={(audioEl) => { if (audioEl) audioEl.srcObject = stream; }} autoPlay />
             ))}
         </div>
