@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState ,useEffect} from 'react';
 import { useRouter } from 'next/navigation';
+import { useAuth } from '@/lib/provider/authprovider';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -15,18 +16,24 @@ const generateRoomName = () => {
 };
 
 export default function Home() {
+  const { user } = useAuth();
   const router = useRouter();
   const [roomName, setRoomName] = useState('');
-  const [participantName, setParticipantName] = useState('');
+useEffect(() => {
+    if (!user) {
+      // If no user is logged in, redirect to the login page
+      router.push('/login');
+      return;
+    }
+  }, [user, router]);
 
   const handleJoinRoom = () => {
-    if (roomName.trim() && participantName.trim()) {
+    if (roomName.trim() ) {
       router.push(`/meeting/${roomName}`);
     }
   };
 
   const handleCreateRoom = () => {
-    if (!participantName.trim()) return;
     const newRoomName = generateRoomName();
     router.push(`/meeting/${newRoomName}`);
   };
@@ -51,20 +58,18 @@ export default function Home() {
           <CardContent className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Your name
+                Your name: {user?.name}
               </label>
-              <Input
-                type="text"
-                value={participantName}
-                onChange={(e) => setParticipantName(e.target.value)}
-                placeholder="Enter your name"
-                className="w-full"
-              />
+            
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Your role: {user?.role}
+              </label>
+            
             </div>
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Room name (optional)
+                Enter Room Name to join the meeting
               </label>
               <Input
                 type="text"
@@ -79,7 +84,7 @@ export default function Home() {
             <div className="space-y-2">
               <Button
                 onClick={handleJoinRoom}
-                disabled={!participantName.trim() || !roomName.trim()}
+                disabled={ !roomName.trim()}
                 className="w-full bg-blue-500 hover:bg-blue-600"
               >
                 <span className="material-icons mr-2">login</span>
@@ -88,7 +93,6 @@ export default function Home() {
 
               <Button
                 onClick={handleCreateRoom}
-                disabled={!participantName.trim()}
                 variant="outline"
                 className="w-full"
               >
