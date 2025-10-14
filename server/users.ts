@@ -7,7 +7,7 @@ export const MOCK_USERS = [
     role: "Admin",
     // email: "sam@example.com",
     email: "sam",
-    password: "password123", // For demo purposes only
+    password: "password", // For demo purposes only
   },
   {
     id: "user-002",
@@ -15,7 +15,7 @@ export const MOCK_USERS = [
     role: "Manager",
     // email: "sundar@example.com",
     email: "sundar",
-    password: "password123",
+    password: "password",
   },
   {
     id: "user-003",
@@ -23,7 +23,7 @@ export const MOCK_USERS = [
     role: "L2",
     // email: "joy@example.com",
     email: "joy",
-    password: "password123",
+    password: "password",
   },
   {
     id: "user-004",
@@ -31,7 +31,7 @@ export const MOCK_USERS = [
     role: "L2",
     // email: "jem@example.com",
     email: "jem",
-    password: "password123",
+    password: "password",
   },
 ];
 

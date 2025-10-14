@@ -1,12 +1,11 @@
-import io, {type Socket } from "socket.io-client";
+import io, { type Socket } from "socket.io-client";
 import * as mediasoupClient from "mediasoup-client";
+
 type Transport = mediasoupClient.types.Transport;
 type Producer = mediasoupClient.types.Producer;
 type Consumer = mediasoupClient.types.Consumer;
 type Device = mediasoupClient.types.Device;
-interface CreateBreakoutRoomsResponse {
-  breakoutRoomNames: string[];
-}
+
 
 type MediaSoupClientOptions = {
   onLocalStream: (stream: MediaStream) => void;
@@ -19,10 +18,15 @@ type MediaSoupClientOptions = {
     participants: { id: string; name: string; isOrganizer: boolean }[]
   ) => void;
   onRemoteTrackRemoved: (peerId: string, track: MediaStreamTrack) => void;
-  onForceMove: (data: { roomName: string }) => void;
-  onBreakoutRoomsList: (rooms: string[]) => void;
-  onAssignmentsUpdated: (assignments: [string, string][]) => void;
-  onBreakoutsEnded: () => void;
+  // onForceMove: (data: { roomName: string }) => void;
+  onBreakoutState: (data: {
+    breakoutRoomNames: string[];
+    assignments: [string, string][];
+  }) => void;
+  onMoveConfirmed: (data: {
+    newRoomName: string;
+    rtpCapabilities: any;
+  }) => void;
 };
 
 let screenProducer: Producer | null = null;
@@ -54,61 +58,69 @@ export default function mediaSoupClient(
     },
   };
 
-  const moveToRoom = async (newRoomName: string) => {
-    console.log(`Moving from room ${currentRoomName} to ${newRoomName}`);
+  const closeAllConnection = () => {
+    console.log("Closing all mediasoup objects and media tracks.");
 
-    // --- A. CLEAN UP EXISTING CONNECTION ---
-    // 1. Close all local producers
-    if (audioProducer) {
-      audioProducer.close();
-      audioProducer = null;
-    }
-    if (videoProducer) {
-      videoProducer.close();
-      videoProducer = null;
-    }
+    // 1. Stop the actual hardware tracks. This turns off the camera/mic light.
+    videoParams.track?.stop();
+    audioParams.track?.stop();
 
-    // 2. Close all consumers and transports
-    // for (const consumer of consumers.values()) {
-    //   consumer.close();
-    // }
+    // 2. Close all mediasoup objects.
+    audioProducer?.close();
+    videoProducer?.close();
+    consumers.forEach((c) => c.close());
+    sendTransport?.close();
+    recvTransport?.close();
+
+    // 3. Clear local state variables.
+    audioProducer = null;
+    videoProducer = null;
+    sendTransport = null;
+    recvTransport = null;
     consumers.clear();
     producerToPeerMap.clear();
-
-    if (sendTransport) {
-      sendTransport.close();
-      sendTransport = null;
-    }
-    if (recvTransport) {
-      recvTransport.close();
-      recvTransport = null;
-    }
-
-    // 3. Clear the device
-    device = null;
-
-    try {
-      //  B. RE-ACQUIRE MEDIA & JOIN NEW ROOM
-      // Get a fresh stream with NEW, active tracks before joining
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: true,
-      });
-
-      // Let the UI know about the new stream for local preview
-      options.onLocalStream(stream);
-
-      // Update params with the NEW tracks
-      audioParams.track = stream.getAudioTracks()[0];
-      videoParams.track = stream.getVideoTracks()[0];
-
-      // Now, join the new room. This will use the FRESH tracks.
-      currentRoomName = newRoomName;
-      joinRoom(newRoomName);
-    } catch (error) {
-      console.error("Error re-acquiring media for room move:", error);
-    }
   };
+
+  const reinitialize = async (
+    rtpCapabilities: any,
+    newLocalStream: MediaStream
+  ) => {
+    console.log("Re-initializing media for new room.");
+    // Update local media tracks
+    audioParams.track = newLocalStream.getAudioTracks()[0];
+    videoParams.track = newLocalStream.getVideoTracks()[0];
+
+    // If we don't have a device, create one.
+    // This handles the very first connection.
+    if (!device) {
+      device = new mediasoupClient.Device();
+    }
+
+    // If the device is not loaded, load it.
+    // The 'load' call is idempotent (safe to call multiple times).
+    if (!device.loaded) {
+      await device.load({ routerRtpCapabilities: rtpCapabilities });
+    }
+
+    // Now, just re-create the transports and producers
+    await createSendTransport();
+    await createRecvTransport();
+    connectSendTransport();
+    getProducers();
+  };
+
+  //
+  const prepareToMove = (newRoomName: string) => {
+    console.log("CLIENT: Received prepare-to-move command. Cleaning up.");
+
+    closeAllConnection();
+
+    // Acknowledge readiness to the server
+    console.log("CLIENT: Cleanup complete. Sending acknowledgment.");
+    socket.emit("client:ready-for-new-room", { newRoomName });
+  };
+
+  //
 
   const getLocalStream = async () => {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -118,18 +130,38 @@ export default function mediaSoupClient(
     options.onLocalStream(stream);
     audioParams.track = stream.getAudioTracks()[0];
     videoParams.track = stream.getVideoTracks()[0];
-    joinRoom(currentRoomName);
-  };
 
-  const joinRoom = (roomNameToJoin: string) => {
     socket.emit(
       "joinRoom",
-      { roomName: roomNameToJoin, participantId: participantId },
-      (data: { rtpCapabilities: mediasoupClient.types.RtpCapabilities }) => {
-        createDevice(data.rtpCapabilities);
+      { roomName: currentRoomName, participantId: participantId },
+      async (data: {
+        rtpCapabilities: mediasoupClient.types.RtpCapabilities;
+      }) => {
+        // This is the first time we connect, so we initialize everything
+        await reinitialize(data.rtpCapabilities, stream);
       }
     );
   };
+
+  // const joinRoom = (roomNameToJoin: string) => {
+  //   socket.emit(
+  //     "joinRoom",
+  //     { roomName: roomNameToJoin, participantId: participantId },
+  //     (data: { rtpCapabilities: mediasoupClient.types.RtpCapabilities }) => {
+  //       createDevice(data.rtpCapabilities);
+  //     }
+  //   );
+  // };
+  //  Listen for the server's command to move.
+  socket.on("server:prepare-to-move", ({ newRoomName }) => {
+    prepareToMove(newRoomName);
+  });
+  // Listen for the server's final confirmation and new room details.
+  socket.on("server:you-are-moved", ({ newRoomName, rtpCapabilities }) => {
+    console.log("CLIENT: Move confirmed by server. Ready to re-initialize.");
+    currentRoomName = newRoomName;
+    options.onMoveConfirmed({ newRoomName, rtpCapabilities });
+  });
   socket.on(
     "room-participants",
     (participants: { id: string; name: string; isOrganizer: boolean }[]) => {
@@ -137,53 +169,32 @@ export default function mediaSoupClient(
     }
   );
 
-  socket.on("server:forceMoveToRoom", (data) => {
-    console.log("Received invitation to join room:", data.breakoutRoomName);
-    // Pass the invitation details up to the React UI to display a modal
-    options.onForceMove({
-      roomName: data.breakoutRoomName,
-    });
-  });
-  socket.on("organizer:assignmentsUpdated", (assignments) => {
-    options.onAssignmentsUpdated(assignments);
-  });
-
-  socket.on("organizer:breakoutsEnded", () => {
-    options.onBreakoutsEnded();
-  });
+  // It handles creation, assignments, and ending of breakouts all at once.
+  socket.on(
+    "organizer:breakoutState",
+    (data: {
+      breakoutRoomNames: string[];
+      assignments: [string, string][];
+    }) => {
+      console.log("Received synchronized breakout state:", data);
+      options.onBreakoutState(data);
+    }
+  );
 
   const createBreakoutRooms = (numRooms: number) => {
-    socket.emit(
-      "organizer:createBreakoutRooms",
-      { roomName: currentRoomName, numRooms },
-      (response: CreateBreakoutRoomsResponse) => {
-        if (response.breakoutRoomNames) {
-          options.onBreakoutRoomsList(response.breakoutRoomNames);
-        }
-      }
-    );
+    socket.emit("organizer:createBreakoutRooms", {
+      roomName: currentRoomName,
+      numRooms,
+    });
   };
 
   const assignPeerToRoom = (peerId: string, targetRoomName: string) => {
     socket.emit("organizer:assignPeerToRoom", { peerId, targetRoomName });
   };
-  socket.on("organizer:breakoutRoomsCreated", (data) => {
-    options.onBreakoutRoomsList(data.breakoutRoomNames);
-  });
-
-  socket.on("organizer:breakoutState", (data) => {
-    options.onBreakoutRoomsList(data.breakoutRooms);
-    options.onAssignmentsUpdated(data.assignments);
-  });
 
   const startBreakouts = () => {
     const mainRoomName = currentRoomName.split("-breakout-")[0];
     socket.emit("organizer:startBreakouts", { mainRoomName });
-  };
-  const requestBreakoutState = () => {
-    socket.emit("organizer:requestBreakoutState", {
-      roomName: currentRoomName,
-    });
   };
 
   const endBreakouts = () => {
@@ -196,19 +207,14 @@ export default function mediaSoupClient(
     socket.emit("peer:exitBreakoutRoom");
   };
 
-  const createDevice = async (
-    rtpCapabilities: mediasoupClient.types.RtpCapabilities
-  ) => {
-    if (isClosed) return;
-    device = new mediasoupClient.Device();
-    await device.load({ routerRtpCapabilities: rtpCapabilities });
-    if (isClosed) return;
-    await createSendTransport();
-    if (isClosed) return;
-    await createRecvTransport();
-    connectSendTransport();
-    getProducers();
-  };
+  //  const createDevice = async (
+  //   rtpCapabilities: mediasoupClient.types.RtpCapabilities
+  // ) => {
+  //     // This is called from the original joinRoom. We can now just
+  //     // call reinitialize with the current local stream.
+  //     const stream = new MediaStream([audioParams.track, videoParams.track].filter(t => t) as MediaStreamTrack[]);
+  //     await reinitialize(rtpCapabilities, stream);
+  // };
 
   const createSendTransport = async () => {
     return new Promise<void>((resolve) => {
@@ -313,41 +319,47 @@ export default function mediaSoupClient(
 
     // Inform the server to close the producer
     // Your server should listen for 'producer-close' and broadcast it
-    socket?.emit("producer-close", { producerId: videoProducer.id });
+    socket.emit("producer-close", { producerId: videoProducer.id });
 
     videoProducer = null;
+    videoParams.track = undefined;
   };
   // --- ADDED FUNCTION: resumeVideoProducer ---
   const resumeVideoProducer = async () => {
     if (!sendTransport) {
-      console.error("Producer transport is not initialized.");
-      return null;
+        console.error("Cannot resume video: sendTransport is not initialized.");
+        return null;
+    }
+    if (videoProducer) {
+        console.warn("Cannot resume video: a video producer already exists.");
+        return videoParams.track || null;
     }
 
-    console.log("Resuming video producer");
-
-    // Get a new video track
+    console.log("Resuming video: getting new media track...");
+    
+    // 1. Get a new video track from the device.
     const stream = await navigator.mediaDevices.getUserMedia({ video: true });
     const newTrack = stream.getVideoTracks()[0];
-
     if (!newTrack) {
-      throw new Error("No video track found");
+        console.error("Failed to get a new video track from getUserMedia.");
+        return null;
     }
 
-    videoParams = { ...videoParams, track: newTrack };
+    // 2. Update our internal track reference.
+    videoParams.track = newTrack;
 
-    // Create a new producer with the new track
-    videoProducer = await sendTransport.produce(videoParams);
+    // 3. ✅ Create a completely fresh params object for the new producer.
+    const producerParams = {
+        track: newTrack,
+        encodings: videoParams.params?.encodings, // Reuse encodings if they exist
+        codecOptions: videoParams.params?.codecOptions,
+    };
 
-    videoProducer.on("trackended", () => {
-      console.log("New video track ended");
-    });
-    videoProducer.on("transportclose", () => {
-      console.log("Transport for new video closed");
-    });
-
+    // 4. Create the new producer.
+    videoProducer = await sendTransport.produce(producerParams);
+    console.log("track returned",newTrack)
     return newTrack;
-  };
+};
 
   // /////
   const stopAudioProducer = () => {
@@ -397,6 +409,9 @@ export default function mediaSoupClient(
   };
 
   const stopScreenShare = () => {
+    if (videoParams.track) {
+      videoParams.track.stop();
+    }
     if (!videoProducer || videoProducer.appData.source !== "screen") return; // Add a flag to know it's a screen
     console.log("Stopping screen share");
     videoProducer.close();
@@ -406,33 +421,12 @@ export default function mediaSoupClient(
   ///
 
   const cleanup = () => {
+    if (isClosed) return;
     isClosed = true;
 
-    // Close producers first
-    if (audioProducer) {
-      audioProducer.close();
-      audioProducer = null;
-    }
-    if (videoProducer) {
-      videoProducer.close();
-      videoProducer = null;
-    }
-
-    // Then consumers
-    consumers.forEach((consumer) => consumer.close());
-    consumers.clear();
-    producerToPeerMap.clear();
-
-    // Then transports
-    if (sendTransport) {
-      sendTransport.close();
-      sendTransport = null;
-    }
-    if (recvTransport) {
-      recvTransport.close();
-      recvTransport = null;
-    }
-
+    console.log("Cleaning up mediasoup client...");
+    closeAllConnection();
+    device = null; // Nullify the device only on final cleanup
     // Finally socket
     socket.disconnect();
   };
@@ -463,12 +457,11 @@ export default function mediaSoupClient(
     resumeAudioProducer,
     startScreenShare,
     stopScreenShare,
-    moveToRoom,
+    reinitialize,
     createBreakoutRooms,
     assignPeerToRoom,
     endBreakouts,
     startBreakouts,
     exitBreakoutRoom,
-    requestBreakoutState,
   };
 }

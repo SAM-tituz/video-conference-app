@@ -5,6 +5,7 @@
   "scripts": {
     "dev:server": "nodemon --exec \"node -r esbuild-register server/index.ts\" -e .ts",
     "dev:client": "next dev --turbopack",
+    "sonar":" sonar-scanner -D sonar-project.properties ",
     "dev": "turbo run dev",
     "build": "next build",
     "start": "next start",

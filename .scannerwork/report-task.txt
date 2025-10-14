@@ -1,0 +1,6 @@
+projectKey=meeting
+serverUrl=http://localhost:9090
+serverVersion=25.9.0.112764
+dashboardUrl=http://localhost:9090/dashboard?id=meeting
+ceTaskId=aefd9759-5ed2-4d16-b4ce-99366822fd0a
+ceTaskUrl=http://localhost:9090/api/ce/task?id=aefd9759-5ed2-4d16-b4ce-99366822fd0a

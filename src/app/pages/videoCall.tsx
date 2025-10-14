@@ -1,18 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/provider/authprovider";
-import mediaSoupClient from "../mediaSoup/mediaSoup";
+import { useMediaSoup } from "../mediaSoup/MediaSoupContext";
 import { ControlBar } from "../meeting/[roomName]/components/ControlBar";
-type MediaSoupClientInstance = ReturnType<typeof mediaSoupClient>;
-
-interface MediaSoupClientOptions {
-  onLocalStream: (stream: MediaStream) => void;
-  onRemoteStream: (peerId: string, stream: MediaStream, kind: string) => void;
-  onRemoteTrackRemoved: (peerId: string, track: MediaStreamTrack) => void;
-  onParticipantList: (participantList: { id: string; name: string }[]) => void;
-}
 
 const VideoTile = ({
   stream,
@@ -28,12 +20,22 @@ const VideoTile = ({
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
-    if (videoRef.current) {
+    if (videoRef.current && stream) {
+      console.log(
+        "Setting video srcObject:",
+        stream,
+        "Tracks:",
+        stream.getTracks()
+      );
       videoRef.current.srcObject = stream;
+      videoRef.current
+        .play()
+        .catch((e) => console.error("Video play failed:", e));
     }
   }, [stream]);
 
-  if (stream.getVideoTracks().length === 0) {
+  if (!stream || stream.getVideoTracks().length === 0) {
+    console.log("No video tracks in stream:", stream?.getTracks());
     return null;
   }
 
@@ -55,214 +57,118 @@ const VideoTile = ({
     </div>
   );
 };
+
 export default function VideoCall() {
   const { user } = useAuth();
   const params = useParams();
   const router = useRouter();
-  const clientRef = useRef<MediaSoupClientInstance | null>(null);
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [remoteStreams, setRemoteStreams] = useState(
-    new Map<string, MediaStream>()
-  );
   const roomName = params.roomName as string;
-  const [presenterId, setPresenterId] = useState<string>("local");
-  const [isVideoOn, setIsVideoOn] = useState(true);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [participants, setParticipants] = useState<
-    { id: string; name: string; isLocal?: boolean; isOrganizer?: boolean }[]
-  >([]);
   const participantId = user?.id;
-
-  // State for Breakout Rooms
-  const [isOrganizer, setIsOrganizer] = useState(false);
-  const [breakoutRooms, setBreakoutRooms] = useState<string[]>([]);
-  const [assignments, setAssignments] = useState(new Map<string, string>());
-
-
-  // In the VideoCall component, add:
+  const {
+    client,
+    currentRoomName,
+    localStream,
+    setLocalStream,
+    remoteStreams,
+    participants,
+    breakoutRooms,
+    assignments,
+    isOrganizer,
+    initialize,
+    toggleVideo, // From context
+    toggleMute, // From context
+    toggleScreenShare,
+  } = useMediaSoup();
+  const [presenterId, setPresenterId] = useState<string>("local");
+ const presenterVideoRef = useRef<HTMLVideoElement>(null);
+  const { isVideoOn, isMuted, isScreenSharing } = useMemo(
+    () => ({
+      isVideoOn: !!localStream?.getVideoTracks().length,
+      isMuted:
+        !localStream?.getAudioTracks().length ||
+        !localStream?.getAudioTracks()[0]?.enabled,
+      isScreenSharing: !!localStream
+        ?.getVideoTracks()
+        .find((t) => t.label.includes("screen")), // Adjust check as needed
+    }),
+    [localStream]
+  );
 useEffect(() => {
-  if (isOrganizer && clientRef.current) {
-    clientRef.current.requestBreakoutState();
-  }
-
-}, [isOrganizer]);
-  useEffect(() => {
     if (!roomName || !user || !participantId) return;
+    initialize(roomName, participantId);
+  }, [roomName, user, participantId, initialize]);
 
-    const client = mediaSoupClient(roomName, participantId, {
-      onLocalStream: (stream) => {
-        setLocalStream(stream);
-      },
-      onRemoteStream: (peerId, stream, kind) => {
-        setRemoteStreams((prev) => {
-          const newStreams = new Map(prev);
-          const existingStream = newStreams.get(peerId);
-          const newTrack = stream.getTracks()[0];
-
-          if (!newTrack) return newStreams;
-          if (existingStream) {
-            const allTracks = [...existingStream.getTracks(), newTrack];
-            const updatedStream = new MediaStream(allTracks);
-            newStreams.set(peerId, updatedStream);
-          } else {
-            newStreams.set(peerId, new MediaStream([newTrack]));
-          }
-          return newStreams;
-        });
-      },
-      onRemoteTrackRemoved: (peerId, track) => {
-        setRemoteStreams((prev) => {
-          const newStreams = new Map(prev);
-          const existingStream = newStreams.get(peerId);
-
-          if (existingStream) {
-            existingStream.removeTrack(track);
-            const updatedStream = new MediaStream(existingStream.getTracks());
-            newStreams.set(peerId, updatedStream);
-            return newStreams;
-          }
-          return prev;
-        });
-      },
-      onParticipantList: (participantList) => {
-        const localId = clientRef.current?.socket.id;
-        const localUser = participantList.find((p) => p.id === localId);
-        if (localUser) {
-          setIsOrganizer(localUser.isOrganizer); // Set status from server data
-        }
-        setParticipants(
-          participantList.map((p) => ({ ...p, isLocal: p.id === localId }))
-        );
-      },
-      onForceMove: (data) => {
-        handleMoveToRoom(data.roomName);
-      },
-      onBreakoutRoomsList: (rooms) => {
-        setBreakoutRooms(rooms);
-      },
-      onAssignmentsUpdated: (updatedAssignments) => {
-        setAssignments(new Map(updatedAssignments));
-      },
-      onBreakoutsEnded: () => {
-        setBreakoutRooms([]);
-        setAssignments(new Map());
-      },
-    });
-
-    clientRef.current = client;
-
-    return () => {
-      clientRef.current?.cleanup();
-      clientRef.current = null;
-    };
-  }, [roomName, user]);
-
-  const handleMoveToRoom = (newRoomName: string) => {
-    if (!clientRef.current) return;
-    setRemoteStreams(new Map());
-    setParticipants([]);
-    setPresenterId("local");
-    setBreakoutRooms([]); // Clear breakout rooms when moving
-    setIsOrganizer(false);
-    clientRef.current.moveToRoom(newRoomName);
-    router.push(`/meeting/${newRoomName}`);
-  };
-
-  const handleToggleVideo = useCallback(async () => {
-    if (!clientRef.current || !localStream) return;
-    if (isVideoOn) {
-      await clientRef.current.stopVideoProducer();
-      const videoTrack = localStream.getVideoTracks()[0];
-      if (videoTrack) localStream.removeTrack(videoTrack);
-    } else {
-      const newTrack = await clientRef.current.resumeVideoProducer();
-      if (newTrack) {
-        localStream.addTrack(newTrack);
-        setLocalStream(new MediaStream(localStream.getTracks()));
-      }
+  useEffect(() => {
+    if (currentRoomName && currentRoomName !== roomName) {
+      router.replace(`/meeting/${currentRoomName}`);
     }
-    setIsVideoOn((prev) => !prev);
-  }, [isVideoOn, localStream]);
+  }, [currentRoomName, roomName, router]);
 
-  const handleToggleMute = useCallback(async () => {
-    if (!clientRef.current || !localStream) return;
-    if (isMuted) {
-      const newTrack = await clientRef.current.resumeAudioProducer();
-      if (newTrack) {
-        localStream.addTrack(newTrack);
-        setLocalStream(new MediaStream(localStream.getTracks()));
-      }
-    } else {
-      await clientRef.current.stopAudioProducer();
-      const audioTrack = localStream.getAudioTracks()[0];
-      if (audioTrack) {
-        localStream.removeTrack(audioTrack);
-      }
-    }
-    setIsMuted((prev) => !prev);
-  }, [isMuted, localStream]);
-
-  const handleScreenShare = useCallback(async () => {
-    if (!clientRef.current || !localStream) return;
-    if (isScreenSharing) {
-      clientRef.current.stopScreenShare();
-      await clientRef.current.resumeVideoProducer();
-      setIsScreenSharing(false);
-    } else {
-      const screenStream = await clientRef.current.startScreenShare();
-      if (screenStream) {
-        const newStream = new MediaStream(localStream.getAudioTracks());
-        newStream.addTrack(screenStream.getVideoTracks()[0]);
-        setLocalStream(newStream);
-        setIsScreenSharing(true);
-      }
-    }
-  }, [isScreenSharing, localStream]);
-
+ 
   const handleLeave = () => {
-    clientRef.current?.cleanup();
+    client?.cleanup();
     router.push("/");
   };
 
-  // ✅ Handlers for Breakout Room actions
   const handleCreateRooms = (numRooms: number) => {
-    clientRef.current?.createBreakoutRooms(numRooms);
+    client?.createBreakoutRooms(numRooms);
   };
 
   const handleAssignPeer = (peerId: string, roomName: string) => {
-    clientRef.current?.assignPeerToRoom(peerId, roomName);
-  };
-  const handleStartBreakouts = () => clientRef.current?.startBreakouts();
-  const handleEndBreakouts = () => clientRef.current?.endBreakouts();
-  const handleExitBreakout = () => {
-    clientRef.current?.exitBreakoutRoom();
+    client?.assignPeerToRoom(peerId, roomName);
   };
 
-  const allParticipants = new Map<
-    string,
-    { stream: MediaStream; name: string }
-  >();
-  if (localStream) {
-    const localUser = participants.find((p) => p.isLocal);
-    allParticipants.set("local", {
-      stream: localStream,
-      name: localUser?.name || "You",
-    });
-  }
-  remoteStreams.forEach((stream, id) =>
-    allParticipants.set(id, {
-      stream,
-      name:
-        participants.find((p) => p.id === id)?.name || `Peer-${id.slice(0, 4)}`,
-    })
-  );
+  const handleStartBreakouts = () => client?.startBreakouts();
+  const handleEndBreakouts = () => client?.endBreakouts();
+  const handleExitBreakout = () => client?.exitBreakoutRoom();
+
+  const allParticipants = useMemo(() => {
+    const participantsMap = new Map<
+      string,
+      { stream: MediaStream; name: string }
+    >();
+    if (localStream) {
+      const localUser = participants.find((p) => p.isLocal);
+      participantsMap.set("local", {
+        stream: localStream,
+        name: localUser?.name || "You",
+      });
+    }
+    remoteStreams.forEach((stream, id) =>
+      participantsMap.set(id, {
+        stream,
+        name:
+          participants.find((p) => p.id === id)?.name ||
+          `Peer-${id.slice(0, 4)}`,
+      })
+    );
+    return participantsMap;
+  }, [localStream, remoteStreams, participants]);
 
   const presenterStream = allParticipants.get(presenterId);
   const sidebarParticipants = Array.from(allParticipants.entries()).filter(
     ([id]) => id !== presenterId
   );
+useEffect(() => {
+    const video = presenterVideoRef.current;
+    if (!video || !presenterStream) return;
 
+    video.pause();
+    video.srcObject = null;
+
+    console.log("Setting presenter srcObject:", presenterStream.stream);
+    video.srcObject = presenterStream.stream;
+
+    const playPromise = video.play();
+    playPromise.catch((e) => console.error("Presenter video play failed:", e));
+
+    return () => {
+      if (video) {
+        video.pause();
+        video.srcObject = null;
+      }
+    };
+  }, [presenterStream]);
   return (
     <div className="bg-gray-800 text-white flex flex-col h-screen font-sans">
       <header className="px-4 py-2 text-sm flex items-center gap-2">
@@ -279,7 +185,8 @@ useEffect(() => {
           />
         </svg>
         <p>
-          {participants.find((p) => p.id === presenterId)?.name} is presenting
+          {participants.find((p) => p.id === presenterId)?.name || "You"} is
+          presenting
         </p>
       </header>
 
@@ -290,8 +197,16 @@ useEffect(() => {
               <video
                 key={presenterId}
                 ref={(el) => {
-                  if (el && presenterStream)
+                  if (el && presenterStream) {
+                    console.log(
+                      "Setting presenter srcObject:",
+                      presenterStream.stream
+                    );
                     el.srcObject = presenterStream.stream;
+                    el.play().catch((e) =>
+                      console.error("Presenter video play failed:", e)
+                    );
+                  }
                 }}
                 autoPlay
                 playsInline
@@ -300,7 +215,7 @@ useEffect(() => {
               />
             ) : (
               <div className="w-full h-full flex items-center justify-center text-gray-400">
-                <p>Click a Video to view Big </p>
+                <p>Click a Video to view Big</p>
               </div>
             )}
           </div>
@@ -329,22 +244,29 @@ useEffect(() => {
               <audio
                 key={`${id}-audio`}
                 ref={(el) => {
-                  if (el) el.srcObject = stream;
+                  if (el) {
+                    el.srcObject = stream;
+                    el.play().catch((e) =>
+                      console.error("Audio play failed:", e)
+                    );
+                  }
                 }}
                 autoPlay
               />
             )
         )}
 
-      {/* ✅ Pass all required props to ControlBar */}
       <ControlBar
         isMuted={isMuted}
         isVideoOn={isVideoOn}
-        onToggleMute={handleToggleMute}
-        onToggleVideo={handleToggleVideo}
-        onScreenShare={handleScreenShare}
+        onToggleMute={toggleMute}
+        onToggleVideo={toggleVideo}
+        isTogglingVideo={false}
+        isTogglingMute={false}
+        onScreenShare={toggleScreenShare}
         onLeave={handleLeave}
         participants={participants}
+        mainRoomParticipants={participants}
         isOrganizer={isOrganizer}
         breakoutRooms={breakoutRooms}
         assignments={assignments}

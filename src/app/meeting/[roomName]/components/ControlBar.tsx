@@ -18,6 +18,8 @@ import {
 interface ControlBarProps {
   isMuted: boolean;
   isVideoOn: boolean;
+  isTogglingVideo: boolean;
+  isTogglingMute: boolean;
   isOrganizer: boolean;
   breakoutRooms: string[];
   assignments: Map<string, string>;
@@ -56,7 +58,7 @@ const ControlButton = ({
 );
 // /////////////////////////////
 const BreakoutPanel = ({
-  participants,
+  mainRoomParticipants,
   breakoutRooms,
   assignments,
   onAssignPeer,
@@ -65,7 +67,7 @@ const BreakoutPanel = ({
   onEndBreakouts,
   roomName,
 }: {
-  participants: { id: string; name: string; isLocal: boolean }[];
+  mainRoomParticipants: { id: string; name: string; isLocal: boolean }[];
   breakoutRooms: string[];
   assignments: Map<string, string>;
   onCreateRooms: (numRooms: number) => void;
@@ -76,15 +78,15 @@ const BreakoutPanel = ({
 }) => {
   const [numRooms, setNumRooms] = useState(2);
   const [isOpen, setIsOpen] = useState(false);
+  const mainRoomName = roomName.split("-breakout-")[0];
   const assignableRooms = [
-    { name: "Main Room", value: "main" },
+    { name: "Main Room", value: mainRoomName },
     ...breakoutRooms.map((r) => ({
       name: `Breakout ${r.split("-").pop()}`,
       value: r,
     })),
   ];
-  const mainRoomParticipants = participants;
-  const mainRoomName = roomName.split("-breakout-")[0];
+  // const mainRoomParticipants = mainRoomParticipants;
 
   return (
     <>
@@ -160,14 +162,7 @@ const BreakoutPanel = ({
                       <span className="truncate">{p.name}</span>
                       <select
                         value={assignments.get(p.id) || "main"}
-                        onChange={(e) =>
-                          onAssignPeer(
-                            p.id,
-                            e.target.value === "main"
-                              ? mainRoomName // ✅ Use the derived name
-                              : e.target.value
-                          )
-                        }
+                        onChange={(e) => onAssignPeer(p.id, e.target.value)}
                         className="w-[180px] bg-gray-700 border-gray-600 text-white rounded p-2"
                       >
                         {assignableRooms.map((room) => (
@@ -195,8 +190,10 @@ export const ControlBar = ({
   isOrganizer,
   breakoutRooms,
   assignments,
-  onToggleMute,
   onToggleVideo,
+  isTogglingVideo,
+  onToggleMute,
+  isTogglingMute,
   onScreenShare,
   onLeave,
   onCreateRooms,
@@ -204,9 +201,10 @@ export const ControlBar = ({
   onStartBreakouts,
   onEndBreakouts,
   participants,
+  mainRoomParticipants,
   onExitBreakout,
   roomName,
-}: ControlBarProps) => {
+}: ControlBarProps & { mainRoomParticipants: any[] }) => {
   const isInBreakout = roomName.includes("-breakout-");
 
   return (
@@ -218,6 +216,7 @@ export const ControlBar = ({
       <div className="flex items-center justify-center gap-4 w-1/2">
         <ControlButton
           onClick={onToggleMute}
+          disabled={isTogglingMute}
           className={
             isMuted
               ? "bg-red-600 hover:bg-red-700"
@@ -228,6 +227,7 @@ export const ControlBar = ({
         </ControlButton>
         <ControlButton
           onClick={onToggleVideo}
+          disabled={isTogglingVideo}
           className={
             !isVideoOn
               ? "bg-red-600 hover:bg-red-700"
@@ -239,7 +239,7 @@ export const ControlBar = ({
 
         {isOrganizer && (
           <BreakoutPanel
-            participants={participants}
+            mainRoomParticipants={mainRoomParticipants}
             breakoutRooms={breakoutRooms}
             assignments={assignments}
             onCreateRooms={onCreateRooms}

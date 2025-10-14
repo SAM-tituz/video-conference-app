@@ -3,9 +3,8 @@ type Router = mediasoup.types.Router;
 import { Socket } from "socket.io";
 import { findUserById } from "./helper/findUsers";
 import type { mockUser } from "./users";
+
 let worker: mediasoup.types.Worker;
-// let rooms: Record<string, Room> = {}; // { roomName1: { Router, rooms: [ soketId1, ... ] }, ...}
-// let peers: Record<string, Peer> = {}; // { socketId1: { roomName1, socket, transports = [id1, id2,] }, producers = [id1, id2,] }, consumers = [id1, id2,], peerDetails }, ...}
 
 const rooms: Record<
   string,
@@ -72,6 +71,28 @@ export const initMediasoup = async (io: any) => {
     worker = await createWorker();
     const connections = io.of("/mediasoup");
 
+    // Centralized function to broadcast the complete breakout room state to all organizers.
+    const broadcastBreakoutState = (mainRoomName: string) => {
+      const mainRoom = rooms[mainRoomName];
+      if (!mainRoom) return;
+
+      const state = {
+        breakoutRoomNames: mainRoom.breakoutRooms ?? [],
+        assignments: Array.from(mainRoom.assignments?.entries() ?? []),
+      };
+
+      // Find all organizers in the main room and send them the latest state.
+      Array.from(mainRoom.peers)
+        .map((peerId) => peers[peerId])
+        .filter(
+          (peer) =>
+            peer && (peer.user.role === "Admin" || peer.user.role === "Manager")
+        )
+        .forEach((organizerPeer) => {
+          organizerPeer.socket.emit("organizer:breakoutState", state);
+        });
+    };
+    //
     connections.on("connection", async (socket: Socket) => {
       console.log("new connectiion", socket.id);
       // connection-success
@@ -79,55 +100,22 @@ export const initMediasoup = async (io: any) => {
         socketId: socket.id,
       });
       //
-      socket.on("organizer:requestBreakoutState", ({ roomName }) => {
-        const mainRoom = rooms[roomName];
-        if (!mainRoom) return;
-
-        const userPeer = peers[socket.id];
-        if (
-          !userPeer ||
-          (userPeer.user.role !== "Admin" && userPeer.user.role !== "Manager")
-        ) {
-          return;
-        }
-
-        socket.emit("organizer:breakoutState", {
-          breakoutRooms: mainRoom.breakoutRooms || [],
-          assignments: mainRoom.assignments
-            ? Array.from(mainRoom.assignments.entries())
-            : [],
-        });
-      });
-
       //
       socket.on("disconnect", () => {
         console.log("peer disconnected", socket.id);
         const peer = peers[socket.id];
+        const roomName = peer.roomName;
+        if (rooms[roomName]) {
+          rooms[roomName].peers.delete(socket.id);
+          // ✅ When a user disconnects, broadcast the updated list to the remaining peers
+          const participantList = getParticipantListForRoom(roomName);
+          connections.to(roomName).emit("room-participants", participantList);
+        }
         if (peer) {
-          const roomName = peer.roomName;
           cleanupPeer(socket.id);
           peer.producers.forEach((producer) => {
             producer.close(); // This will notify all consumers
           });
-
-          if (rooms[roomName]) {
-            rooms[roomName].peers.delete(socket.id);
-            // ✅ When a user disconnects, broadcast the updated list to the remaining peers
-            const participantList = Array.from(rooms[roomName].peers).map(
-              (id) => {
-                const peer = peers[id];
-                const isPeerOrganizer =
-                  peer.user.role === "Admin" || peer.user.role === "Manager";
-                return {
-                  id,
-                  userId: peer.user.id,
-                  name: peer.user.name,
-                  isOrganizer: isPeerOrganizer,
-                };
-              }
-            );
-            connections.to(roomName).emit("room-participants", participantList);
-          }
 
           peer.transports.forEach((transport) => transport.close());
           delete peers[socket.id];
@@ -155,39 +143,7 @@ export const initMediasoup = async (io: any) => {
         }
         const router = await createRoom(roomName);
         rooms[roomName].peers.add(socket.id);
-        const mainRoomName = roomName.split("-breakout-")[0];
-        const mainRoom = rooms[mainRoomName];
 
-        const isOrganizerRole =
-          user.role === "Admin" || user.role === "Manager";
-
-        if (isOrganizerRole) {
-          const mainRoomName = roomName.split("-breakout-")[0];
-          const mainRoom = rooms[mainRoomName];
-
-          if (
-            mainRoom &&
-            mainRoom.breakoutRooms &&
-            mainRoom.breakoutRooms.length > 0
-          ) {
-            socket.emit("organizer:breakoutState", {
-              breakoutRooms: mainRoom.breakoutRooms,
-              assignments: mainRoom.assignments
-                ? Array.from(mainRoom.assignments.entries())
-                : [],
-            });
-          }
-        }
-
-        if (
-          mainRoom &&
-          !mainRoom.organizerId &&
-          isOrganizerRole &&
-          !roomName.includes("-breakout-")
-        ) {
-          mainRoom.organizerId = user.id;
-        }
-        // ✅ THE FIX: Create the peer object FIRST.
         peers[socket.id] = {
           socket,
           roomName,
@@ -197,6 +153,37 @@ export const initMediasoup = async (io: any) => {
           consumers: new Map(),
         };
         socket.join(roomName);
+
+        const mainRoomName = roomName.split("-breakout-")[0];
+        const mainRoom = rooms[mainRoomName];
+        if (!mainRoom) {
+          console.error(
+            `Could not find main room "${mainRoomName}" for a user joining "${roomName}".`
+          );
+          return callback({ error: "Associated main room not found." });
+        }
+        const isOrganizerRole =
+          user.role === "Admin" || user.role === "Manager";
+
+        if (
+          mainRoom &&
+          !mainRoom.organizerId &&
+          isOrganizerRole &&
+          !roomName.includes("-breakout-")
+        ) {
+          mainRoom.organizerId = user.id;
+        }
+
+        if (
+          isOrganizerRole &&
+          mainRoom.breakoutRooms &&
+          mainRoom.breakoutRooms.length > 0
+        ) {
+          socket.emit("organizer:breakoutState", {
+            breakoutRoomNames: mainRoom.breakoutRooms,
+            assignments: Array.from(mainRoom.assignments?.entries() ?? []),
+          });
+        }
 
         const participantList = Array.from(rooms[roomName].peers)
           .map((id) => {
@@ -219,6 +206,9 @@ export const initMediasoup = async (io: any) => {
           const mainRoomList = Array.from(mainRoom.peers)
             .map((id) => {
               const peer = peers[id];
+              if (!peer) {
+                return null;
+              }
               const isPeerOrganizer =
                 peer.user.role === "Admin" || peer.user.role === "Manager";
               return {
@@ -247,6 +237,9 @@ export const initMediasoup = async (io: any) => {
         }
         const { roomName } = peers[socket.id];
         const router = rooms[roomName].router;
+        console.log(
+          `SERVER: Creating transport for peer ${peer.user.name} in room ${peer.roomName}`
+        );
         const transport = await createWebRtcTransport(router);
         peer.transports.set(transport.id, transport);
         callback({
@@ -374,18 +367,17 @@ export const initMediasoup = async (io: any) => {
 
       //
       socket.on("consumer-resume", async ({ serverConsumerId }) => {
-        try {
-          const consumer = peers[socket.id]?.consumers.get(serverConsumerId);
-          if (consumer && !consumer.closed) {
+        const consumer = peers[socket.id]?.consumers.get(serverConsumerId);
+        if (consumer && !consumer.closed) {
+          try {
             await consumer.resume();
+          } catch (error) {
+            console.error("Error resuming consumer:", error);
           }
-        } catch (error) {
-          console.error("Error resuming consumer:", error);
-          // Remove the closed consumer
-          peers[socket.id]?.consumers.delete(serverConsumerId);
         }
       });
       //
+
       // ///brakout logic////
 
       //
@@ -399,10 +391,72 @@ export const initMediasoup = async (io: any) => {
         callback(participantList);
       });
       //
+      const getParticipantListForRoom = (roomName: string) => {
+        const room = rooms[roomName];
+        if (!room) return [];
+        return Array.from(room.peers)
+          .map((id) => {
+            const peerData = peers[id];
+            if (!peerData) return null;
+            const isPeerOrganizer =
+              peerData.user.role === "Admin" ||
+              peerData.user.role === "Manager";
+            return {
+              id,
+              userId: peerData.user.id,
+              name: peerData.user.name,
+              isOrganizer: isPeerOrganizer,
+            };
+          })
+          .filter(Boolean);
+      };
+      //
+      socket.on("client:ready-for-new-room", async ({ newRoomName }) => {
+        const peer = peers[socket.id];
+        if (!peer || !rooms[newRoomName]){
+          console.error(`Invalid peer or room: ${socket.id}, ${newRoomName}`);
+          return;
+        } 
 
+        const oldRoomName = peer.roomName;
+        console.log(
+          `SERVER: Explicitly cleaning up media objects for ${peer.user.name} before move.`
+        );
+        peer.transports.forEach((transport) => transport.close());
+        peer.producers.forEach((producer) => producer.close());
+        peer.consumers.forEach((consumer) => consumer.close());
+        peer.transports.clear();
+        peer.producers.clear();
+        peer.consumers.clear();
+        console.log(
+          `SERVER: Moving peer ${peer.user.name} from ${oldRoomName} to ${newRoomName}`
+        );
+        if (rooms[oldRoomName]) {
+          rooms[oldRoomName].peers.delete(socket.id);
+          socket.leave(oldRoomName);
+        }
+
+        rooms[newRoomName].peers.add(socket.id);
+        peer.roomName = newRoomName;
+        socket.join(newRoomName);
+
+        const router = rooms[newRoomName].router;
+        socket.emit("server:you-are-moved", {
+          newRoomName: newRoomName,
+          rtpCapabilities: router.rtpCapabilities,
+        });
+
+        const oldRoomList = getParticipantListForRoom(oldRoomName);
+        connections.to(oldRoomName).emit("room-participants", oldRoomList);
+
+        const newRoomList = getParticipantListForRoom(newRoomName);
+        connections.to(newRoomName).emit("room-participants", newRoomList);
+      });
+
+      //
       socket.on(
         "organizer:createBreakoutRooms",
-        async ({ roomName, numRooms }, callback) => {
+        async ({ roomName, numRooms }) => {
           const userPeer = peers[socket.id];
 
           if (
@@ -413,11 +467,14 @@ export const initMediasoup = async (io: any) => {
             return; // Stop non-organizers
           }
           const mainRoom = rooms[roomName];
-          if (!mainRoom) return callback({ error: "Main room not found." });
-
+          if (!mainRoom) {
+            console.error(
+              `Main room "${roomName}" not found for creating breakout rooms.`
+            );
+            return;
+          }
           mainRoom.breakoutRooms = [];
           mainRoom.assignments = new Map();
-          const breakoutRoomNames: string[] = [];
 
           for (let i = 0; i < numRooms; i++) {
             const breakoutRoomName = `${roomName}-breakout-${i + 1}`;
@@ -427,282 +484,146 @@ export const initMediasoup = async (io: any) => {
               rooms[breakoutRoomName].organizerId = mainRoom.organizerId;
             }
             mainRoom.breakoutRooms.push(breakoutRoomName);
-            breakoutRoomNames.push(breakoutRoomName);
           }
-          const organizersInMainRoom = Array.from(mainRoom.peers).filter(
-            (peerId) => {
-              const peer = peers[peerId];
-              return (
-                peer &&
-                (peer.user.role === "Admin" || peer.user.role === "Manager")
-              );
-            }
-          );
 
-          organizersInMainRoom.forEach((organizerId) => {
-            peers[organizerId]?.socket.emit("organizer:breakoutRoomsCreated", {
-              breakoutRoomNames,
-              mainRoomName: roomName,
-            });
-          });
-          callback({ breakoutRoomNames });
+          broadcastBreakoutState(roomName);
         }
       );
 
       socket.on("organizer:assignPeerToRoom", ({ peerId, targetRoomName }) => {
-        const userPeer = peers[socket.id];
-        const peerToAssign = peers[peerId];
+        const organizer = peers[socket.id];
+        // const peerToAssign = peers[peerId];
         if (
-          !userPeer ||
-          (userPeer.user.role !== "Admin" && userPeer.user.role !== "Manager")
+          !organizer ||
+          (organizer.user.role !== "Admin" && organizer.user.role !== "Manager")
         ) {
           return;
         }
 
-        if (
-          peerToAssign &&
-          (peerToAssign.user.role === "Admin" ||
-            peerToAssign.user.role === "Manager")
-        ) {
-          const targetRoom = rooms[targetRoomName];
-          if (targetRoom) {
-            targetRoom.organizerId = peerToAssign.user.id.toString();
-          }
-        }
-        const mainRoomName = userPeer.roomName.split("-breakout-")[0];
+        const mainRoomName = organizer.roomName.split("-breakout-")[0];
         const mainRoom = rooms[mainRoomName];
 
         if (mainRoom?.assignments) {
           mainRoom.assignments.set(peerId, targetRoomName);
-          const organizersInMainRoom = Array.from(mainRoom.peers).filter(
-            (peerId) => {
-              const peer = peers[peerId];
-              return (
-                peer &&
-                (peer.user.role === "Admin" || peer.user.role === "Manager")
-              );
-            }
-          );
-
-          organizersInMainRoom.forEach((organizerId) => {
-            peers[organizerId]?.socket.emit(
-              "organizer:assignmentsUpdated",
-              Array.from(mainRoom.assignments.entries())
-            );
-          });
+          broadcastBreakoutState(mainRoomName);
         }
       });
 
       socket.on("organizer:startBreakouts", ({ mainRoomName }) => {
         const mainRoom = rooms[mainRoomName];
+        if (!mainRoom || !mainRoom.assignments) return;
         const userPeer = peers[socket.id];
-        if (
-          !userPeer ||
-          !mainRoom ||
-          userPeer.user.id !== mainRoom.organizerId
-        ) {
+        const isOrganizer =
+          userPeer &&
+          (userPeer.user.role === "Admin" || userPeer.user.role === "Manager");
+        if (!isOrganizer || !mainRoom) {
           return;
         }
-        if (!mainRoom || !mainRoom.assignments) return;
+        if (!mainRoom.assignments) return;
+
         for (const [peerId, targetRoomName] of mainRoom.assignments.entries()) {
           const peerToMove = peers[peerId];
           if (peerToMove && peerToMove.roomName !== targetRoomName) {
-            cleanupPeerMediasoupObjects(peerId);
-            const oldRoomName = peerToMove.roomName;
-            if (rooms[oldRoomName]) rooms[oldRoomName].peers.delete(peerId);
-            if (rooms[targetRoomName]) rooms[targetRoomName].peers.add(peerId);
-            peerToMove.roomName = targetRoomName;
-
-            peerToMove.socket.emit("server:forceMoveToRoom", {
-              breakoutRoomName: targetRoomName,
+            peerToMove.socket.emit("server:prepare-to-move", {
+              newRoomName: targetRoomName,
             });
           }
         }
-        // After moving, broadcast updated lists to all affected rooms
-        setTimeout(() => {
-          const allAffectedRooms = new Set([
-            mainRoomName,
-            ...(mainRoom.assignments
-              ? Array.from(mainRoom.assignments.values())
-              : []),
-          ]);
-          allAffectedRooms.forEach((rName) => {
-            const room = rooms[rName];
-            if (room) {
-              const updatedList = Array.from(room.peers)
-                .map((id) => {
-                  const peer = peers[id];
-                  const isPeerOrganizer =
-                    peer.user.role === "Admin" || peer.user.role === "Manager";
-                  return {
-                    id,
-                    userId: peer.user.id,
-                    name: peer.user.name,
-                    isOrganizer: isPeerOrganizer,
-                  };
-                })
-                .filter(Boolean);
-              connections.to(rName).emit("room-participants", updatedList);
-            }
-          });
-        }, 1000); // Delay to allow clients to connect
       });
       //
       socket.on("peer:exitBreakoutRoom", () => {
         const peer = peers[socket.id];
-        if (!peer || !peer.roomName.includes("-breakout-")) {
-          // Ignore if the user isn't in a breakout room
-          return;
-        }
-        cleanupPeerMediasoupObjects(socket.id);
+        if (!peer || !peer.roomName.includes("-breakout-")) return;
+
         const currentRoomName = peer.roomName;
         const mainRoomName = currentRoomName.split("-breakout-")[0];
-        const currentRoom = rooms[currentRoomName];
         const mainRoom = rooms[mainRoomName];
 
         if (!rooms[currentRoomName] || !mainRoom) {
           console.error("Could not find rooms for peer exiting breakout.");
           return;
         }
-        rooms[currentRoomName].peers.delete(socket.id);
-        mainRoom.peers.add(socket.id);
-        peer.roomName = mainRoomName;
 
-        //  FIX: Update the assignment map to reflect the move
         if (mainRoom.assignments) {
           mainRoom.assignments.set(socket.id, mainRoomName);
-
-          // Notify the organizer that assignments have changed
-          const organizerPeer = Object.values(peers).find(
-            (p) => p.user.id === mainRoom.organizerId
-          );
-          if (organizerPeer) {
-            organizerPeer.socket.emit(
-              "organizer:assignmentsUpdated",
-              Array.from(mainRoom.assignments.entries())
-            );
-          }
+          broadcastBreakoutState(mainRoomName);
         }
 
         //  Tell the client to execute the move
-        socket.emit("server:forceMoveToRoom", {
-          breakoutRoomName: mainRoomName,
-        });
-
-        //  Broadcast updated participant lists to both rooms
-        // Update the breakout room (one less participant)
-        const breakoutList = Array.from(currentRoom.peers).map((id) => {
-          const p = peers[id];
-          const isOrg = p.user.role === "Admin" || p.user.role === "Manager";
-          return {
-            id,
-            userId: p.user.id,
-            name: p.user.name,
-            isOrganizer: isOrg,
-          };
-        });
-        connections.to(currentRoomName).emit("room-participants", breakoutList);
-
-        // Use a small delay to allow the client to reconnect before broadcasting
-        // the final list to the main room.
-        setTimeout(() => {
-          const mainList = Array.from(mainRoom.peers).map((id) => {
-            const p = peers[id];
-            const isOrg = p.user.role === "Admin" || p.user.role === "Manager";
-            return {
-              id,
-              userId: p.user.id,
-              name: p.user.name,
-              isOrganizer: isOrg,
-            };
+        if (rooms[mainRoomName]) {
+          peer.socket.emit("server:prepare-to-move", {
+            newRoomName: mainRoomName,
           });
-          connections.to(mainRoomName).emit("room-participants", mainList);
-        }, 1000);
+        }
       });
 
       //
       socket.on("organizer:endBreakouts", ({ mainRoomName }) => {
-        const userPeer = peers[socket.id];
         const mainRoom = rooms[mainRoomName];
-        if (
-          !userPeer ||
-          !mainRoom ||
-          userPeer.user.id !== mainRoom.organizerId
-        ) {
+        const userPeer = peers[socket.id];
+        const isOrganizer =
+          userPeer &&
+          (userPeer.user.role === "Admin" || userPeer.user.role === "Manager");
+
+        if (!isOrganizer || !mainRoom) {
           return;
         }
-        if (!mainRoom || !mainRoom.breakoutRooms) return;
+
+        if (!mainRoom.breakoutRooms) return;
         mainRoom.breakoutRooms.forEach((breakoutRoomName) => {
           const breakoutRoom = rooms[breakoutRoomName];
-          if (breakoutRoom) {
-            breakoutRoom.peers.forEach((peerId) => {
-              const peer = peers[peerId];
-              if (peer) {
-                cleanupPeerMediasoupObjects(peerId);
-                peer.roomName = mainRoomName;
-                mainRoom.peers.add(peerId);
-                peer.socket.emit("server:forceMoveToRoom", {
-                  breakoutRoomName: mainRoomName,
-                });
-              }
-            });
-          }
-          // delete rooms[breakoutRoomName];
+
+          breakoutRoom?.peers.forEach((peerId) => {
+            const peer = peers[peerId];
+
+            if (peer) {
+              peer.socket.emit("server:prepare-to-move", {
+                newRoomName: mainRoomName,
+              });
+            }
+          });
         });
+
         mainRoom.breakoutRooms = [];
         mainRoom.assignments = new Map();
-        socket.emit("organizer:breakoutsEnded");
-        setTimeout(() => {
-          const finalList = Array.from(mainRoom.peers).map((id) => {
-            const peer = peers[id];
-            const isPeerOrganizer =
-              peer.user.role === "Admin" || peer.user.role === "Manager";
-            return {
-              id,
-              userId: peer.user.id,
-              name: peer.user.name,
-              isOrganizer: isPeerOrganizer,
-            };
-          });
-          connections.to(mainRoomName).emit("room-participants", finalList);
-        }, 1000);
+        broadcastBreakoutState(mainRoomName);
       });
       //
-      const cleanupPeerMediasoupObjects = (socketId: string) => {
-        const peer = peers[socketId];
-        if (!peer) return;
+      // const cleanupPeerMediasoupObjects = (socketId: string) => {
+      //   const peer = peers[socketId];
+      //   if (!peer) return;
 
-        // Close consumers first
-        peer.consumers.forEach((consumer) => {
-          try {
-            if (!consumer.closed) consumer.close();
-          } catch (error) {
-            console.error("Error closing consumer:", error);
-          }
-        });
+      //   // Close consumers first
+      //   peer.consumers.forEach((consumer) => {
+      //     try {
+      //       if (!consumer.closed) consumer.close();
+      //     } catch (error) {
+      //       console.error("Error closing consumer:", error);
+      //     }
+      //   });
 
-        // Then producers
-        peer.producers.forEach((producer) => {
-          try {
-            if (!producer.closed) producer.close();
-          } catch (error) {
-            console.error("Error closing producer:", error);
-          }
-        });
+      //   // Then producers
+      //   peer.producers.forEach((producer) => {
+      //     try {
+      //       if (!producer.closed) producer.close();
+      //     } catch (error) {
+      //       console.error("Error closing producer:", error);
+      //     }
+      //   });
 
-        // Finally transports
-        peer.transports.forEach((transport) => {
-          try {
-            if (!transport.closed) transport.close();
-          } catch (error) {
-            console.error("Error closing transport:", error);
-          }
-        });
+      //   // Finally transports
+      //   peer.transports.forEach((transport) => {
+      //     try {
+      //       if (!transport.closed) transport.close();
+      //     } catch (error) {
+      //       console.error("Error closing transport:", error);
+      //     }
+      //   });
 
-        peer.producers.clear();
-        peer.consumers.clear();
-        peer.transports.clear();
-      };
+      //   peer.producers.clear();
+      //   peer.consumers.clear();
+      //   peer.transports.clear();
+      // };
       //
 
       const cleanupPeer = (socketId: string) => {
@@ -710,9 +631,8 @@ export const initMediasoup = async (io: any) => {
         if (!peer) return;
 
         console.log(
-          `Cleaning up mediasoup objects for peer: ${peer.user.name}`
+          `SERVER: Cleaning up peer ${peer.user.name} from room ${peer.roomName}. Closing ${peer.transports.size} transports.`
         );
-
         // Close all of this peer's producers, consumers, and transports
         peer.producers.forEach((producer) => producer.close());
         peer.consumers.forEach((consumer) => consumer.close());
