@@ -1,3 +1,4 @@
+import "dotenv/config"
 import io, { type Socket } from "socket.io-client";
 import * as mediasoupClient from "mediasoup-client";
 
@@ -5,7 +6,6 @@ type Transport = mediasoupClient.types.Transport;
 type Producer = mediasoupClient.types.Producer;
 type Consumer = mediasoupClient.types.Consumer;
 type Device = mediasoupClient.types.Device;
-
 
 type MediaSoupClientOptions = {
   onLocalStream: (stream: MediaStream) => void;
@@ -27,6 +27,10 @@ type MediaSoupClientOptions = {
     newRoomName: string;
     rtpCapabilities: any;
   }) => void;
+  onForceMute: () => void;
+  onForceStopVideo: () => void;
+  onKicked: () => void;
+  
 };
 
 let screenProducer: Producer | null = null;
@@ -37,7 +41,8 @@ export default function mediaSoupClient(
   options: MediaSoupClientOptions
 ) {
   let isClosed = false;
-  const socket: Socket = io("http://localhost:8000/mediasoup");
+  const serverUrl = process.env.NEXT_PUBLIC_MEDIASOUP_CLIENT_URL
+  const socket: Socket = io(`${serverUrl}/mediasoup`);
   const consumers = new Map<string, Consumer>();
   const producerToPeerMap = new Map<string, string>();
   let currentRoomName = roomName;
@@ -105,7 +110,7 @@ export default function mediaSoupClient(
     // Now, just re-create the transports and producers
     await createSendTransport();
     await createRecvTransport();
-    connectSendTransport();
+    await connectSendTransport();
     getProducers();
   };
 
@@ -143,15 +148,7 @@ export default function mediaSoupClient(
     );
   };
 
-  // const joinRoom = (roomNameToJoin: string) => {
-  //   socket.emit(
-  //     "joinRoom",
-  //     { roomName: roomNameToJoin, participantId: participantId },
-  //     (data: { rtpCapabilities: mediasoupClient.types.RtpCapabilities }) => {
-  //       createDevice(data.rtpCapabilities);
-  //     }
-  //   );
-  // };
+ 
   //  Listen for the server's command to move.
   socket.on("server:prepare-to-move", ({ newRoomName }) => {
     prepareToMove(newRoomName);
@@ -207,14 +204,7 @@ export default function mediaSoupClient(
     socket.emit("peer:exitBreakoutRoom");
   };
 
-  //  const createDevice = async (
-  //   rtpCapabilities: mediasoupClient.types.RtpCapabilities
-  // ) => {
-  //     // This is called from the original joinRoom. We can now just
-  //     // call reinitialize with the current local stream.
-  //     const stream = new MediaStream([audioParams.track, videoParams.track].filter(t => t) as MediaStreamTrack[]);
-  //     await reinitialize(rtpCapabilities, stream);
-  // };
+
 
   const createSendTransport = async () => {
     return new Promise<void>((resolve) => {
@@ -327,22 +317,22 @@ export default function mediaSoupClient(
   // --- ADDED FUNCTION: resumeVideoProducer ---
   const resumeVideoProducer = async () => {
     if (!sendTransport) {
-        console.error("Cannot resume video: sendTransport is not initialized.");
-        return null;
+      console.error("Cannot resume video: sendTransport is not initialized.");
+      return null;
     }
     if (videoProducer) {
-        console.warn("Cannot resume video: a video producer already exists.");
-        return videoParams.track || null;
+      console.warn("Cannot resume video: a video producer already exists.");
+      return videoParams.track || null;
     }
 
     console.log("Resuming video: getting new media track...");
-    
+
     // 1. Get a new video track from the device.
     const stream = await navigator.mediaDevices.getUserMedia({ video: true });
     const newTrack = stream.getVideoTracks()[0];
     if (!newTrack) {
-        console.error("Failed to get a new video track from getUserMedia.");
-        return null;
+      console.error("Failed to get a new video track from getUserMedia.");
+      return null;
     }
 
     // 2. Update our internal track reference.
@@ -350,16 +340,16 @@ export default function mediaSoupClient(
 
     // 3. ✅ Create a completely fresh params object for the new producer.
     const producerParams = {
-        track: newTrack,
-        encodings: videoParams.params?.encodings, // Reuse encodings if they exist
-        codecOptions: videoParams.params?.codecOptions,
+      track: newTrack,
+      encodings: videoParams.params?.encodings, // Reuse encodings if they exist
+      codecOptions: videoParams.params?.codecOptions,
     };
 
     // 4. Create the new producer.
     videoProducer = await sendTransport.produce(producerParams);
-    console.log("track returned",newTrack)
+    console.log("track returned", newTrack);
     return newTrack;
-};
+  };
 
   // /////
   const stopAudioProducer = () => {
@@ -419,7 +409,48 @@ export default function mediaSoupClient(
     videoProducer = null;
   };
   ///
+  // --- Organizer Actions ---
+  const remoteMutePeer = (peerId: string) => {
+    console.log(`Requesting server to mute peer: ${peerId}`);
+    socket.emit("organizer:mute-peer", { targetPeerId: peerId });
+  };
 
+  const remoteStopVideoPeer = (peerId: string) => {
+    console.log(`Requesting server to stop video for peer: ${peerId}`);
+    socket.emit("organizer:stop-video-peer", { targetPeerId: peerId });
+  };
+
+  const kickPeer = (peerId: string) => {
+    console.log(`Requesting server to kick peer: ${peerId}`);
+    socket.emit("organizer:kick-peer", { targetPeerId: peerId });
+  };
+
+  // --- Listen for Server Commands ---
+  socket.on("server:force-mute", () => {
+    console.log("Received force mute command from server.");
+    // stopAudioProducer();
+    options.onForceMute();
+    // Optional: Update local UI state immediately if not relying solely on context update
+    // options.onLocalMuteChange?.(true); // Need to add this callback to options if needed
+  });
+
+  socket.on("server:force-stop-video", () => {
+    console.log("Received force stop video command from server.");
+    // stopVideoProducer();
+    options.onForceStopVideo();
+    // Optional: Update local UI state
+    // options.onLocalVideoChange?.(false); // Need to add this callback to options if needed
+  });
+
+  socket.on("server:you-are-kicked", () => {
+    console.log("Received kick command from server.");
+
+    // cleanup(); // Perform full cleanup
+    options.onKicked();
+
+    // The VideoCall component should handle redirecting on cleanup/context change
+  });
+  // /
   const cleanup = () => {
     if (isClosed) return;
     isClosed = true;
@@ -463,5 +494,8 @@ export default function mediaSoupClient(
     endBreakouts,
     startBreakouts,
     exitBreakoutRoom,
+    remoteMutePeer,
+    remoteStopVideoPeer,
+    kickPeer,
   };
 }

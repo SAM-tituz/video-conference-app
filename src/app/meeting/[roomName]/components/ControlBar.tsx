@@ -12,14 +12,11 @@ import {
   PhoneOff,
   Users,
   MessageSquare,
-  Users as BreakoutIcon,
 } from "lucide-react";
 
 interface ControlBarProps {
   isMuted: boolean;
   isVideoOn: boolean;
-  isTogglingVideo: boolean;
-  isTogglingMute: boolean;
   isOrganizer: boolean;
   breakoutRooms: string[];
   assignments: Map<string, string>;
@@ -34,6 +31,9 @@ interface ControlBarProps {
   participants: any[];
   onExitBreakout: () => void;
   roomName: string;
+  onRemoteMute: (peerId: string) => void;
+  onRemoteStopVideo: (peerId: string) => void;
+  onKickPeer: (peerId: string) => void;
 }
 
 // Reusable circular button
@@ -191,9 +191,7 @@ export const ControlBar = ({
   breakoutRooms,
   assignments,
   onToggleVideo,
-  isTogglingVideo,
   onToggleMute,
-  isTogglingMute,
   onScreenShare,
   onLeave,
   onCreateRooms,
@@ -204,6 +202,9 @@ export const ControlBar = ({
   mainRoomParticipants,
   onExitBreakout,
   roomName,
+  onRemoteMute,
+  onRemoteStopVideo,
+  onKickPeer,
 }: ControlBarProps & { mainRoomParticipants: any[] }) => {
   const isInBreakout = roomName.includes("-breakout-");
 
@@ -216,7 +217,6 @@ export const ControlBar = ({
       <div className="flex items-center justify-center gap-4 w-1/2">
         <ControlButton
           onClick={onToggleMute}
-          disabled={isTogglingMute}
           className={
             isMuted
               ? "bg-red-600 hover:bg-red-700"
@@ -227,7 +227,6 @@ export const ControlBar = ({
         </ControlButton>
         <ControlButton
           onClick={onToggleVideo}
-          disabled={isTogglingVideo}
           className={
             !isVideoOn
               ? "bg-red-600 hover:bg-red-700"
@@ -273,7 +272,13 @@ export const ControlBar = ({
 
       {/* Right Side Controls */}
       <div className="flex items-center justify-end gap-4 w-1/4">
-        <ParticipantsPanel participants={participants} />
+        <ParticipantsPanel
+          participants={participants}
+          isCurrentUserOrganizer={isOrganizer} // Pass down organizer status
+          onRemoteMute={onRemoteMute} // Pass down handler
+          onRemoteStopVideo={onRemoteStopVideo} // Pass down handler
+          onKickPeer={onKickPeer} // Pass down handler
+        />
         <ControlButton
           onClick={() => {}}
           className="bg-transparent hover:bg-gray-700"

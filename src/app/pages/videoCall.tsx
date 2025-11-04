@@ -68,7 +68,6 @@ export default function VideoCall() {
     client,
     currentRoomName,
     localStream,
-    setLocalStream,
     remoteStreams,
     participants,
     breakoutRooms,
@@ -78,9 +77,13 @@ export default function VideoCall() {
     toggleVideo, // From context
     toggleMute, // From context
     toggleScreenShare,
+    remoteMutePeer,
+    remoteStopVideoPeer,
+    kickPeer,
+    isKicked,
   } = useMediaSoup();
   const [presenterId, setPresenterId] = useState<string>("local");
- const presenterVideoRef = useRef<HTMLVideoElement>(null);
+  const presenterVideoRef = useRef<HTMLVideoElement>(null);
   const { isVideoOn, isMuted, isScreenSharing } = useMemo(
     () => ({
       isVideoOn: !!localStream?.getVideoTracks().length,
@@ -93,7 +96,7 @@ export default function VideoCall() {
     }),
     [localStream]
   );
-useEffect(() => {
+  useEffect(() => {
     if (!roomName || !user || !participantId) return;
     initialize(roomName, participantId);
   }, [roomName, user, participantId, initialize]);
@@ -104,11 +107,16 @@ useEffect(() => {
     }
   }, [currentRoomName, roomName, router]);
 
- 
-  const handleLeave = () => {
+  const handleLeave = useCallback(() => {
     client?.cleanup();
     router.push("/");
-  };
+  }, [client, router]);
+  useEffect(() => {
+    if (isKicked) {
+      alert("You have been removed from the meeting by the organizer.");
+      handleLeave();
+    }
+  }, [isKicked, handleLeave]);
 
   const handleCreateRooms = (numRooms: number) => {
     client?.createBreakoutRooms(numRooms);
@@ -149,7 +157,7 @@ useEffect(() => {
   const sidebarParticipants = Array.from(allParticipants.entries()).filter(
     ([id]) => id !== presenterId
   );
-useEffect(() => {
+  useEffect(() => {
     const video = presenterVideoRef.current;
     if (!video || !presenterStream) return;
 
@@ -196,18 +204,7 @@ useEffect(() => {
             {presenterStream ? (
               <video
                 key={presenterId}
-                ref={(el) => {
-                  if (el && presenterStream) {
-                    console.log(
-                      "Setting presenter srcObject:",
-                      presenterStream.stream
-                    );
-                    el.srcObject = presenterStream.stream;
-                    el.play().catch((e) =>
-                      console.error("Presenter video play failed:", e)
-                    );
-                  }
-                }}
+                ref={presenterVideoRef}
                 autoPlay
                 playsInline
                 muted={presenterId === "local"}
@@ -261,8 +258,6 @@ useEffect(() => {
         isVideoOn={isVideoOn}
         onToggleMute={toggleMute}
         onToggleVideo={toggleVideo}
-        isTogglingVideo={false}
-        isTogglingMute={false}
         onScreenShare={toggleScreenShare}
         onLeave={handleLeave}
         participants={participants}
@@ -276,6 +271,9 @@ useEffect(() => {
         onEndBreakouts={handleEndBreakouts}
         onExitBreakout={handleExitBreakout}
         roomName={roomName}
+        onRemoteMute={remoteMutePeer}
+        onRemoteStopVideo={remoteStopVideoPeer}
+        onKickPeer={kickPeer}
       />
     </div>
   );

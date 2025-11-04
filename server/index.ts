@@ -1,3 +1,4 @@
+import "dotenv/config"
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -5,7 +6,7 @@ import { initMediasoup } from './mediasoup-server';
 
 
 const app = express();
-const port = process.env.PORT || 8000;
+const port = process.env.PORT;
 
 
 

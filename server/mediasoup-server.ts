@@ -2,32 +2,17 @@ import * as mediasoup from "mediasoup";
 type Router = mediasoup.types.Router;
 import { Socket } from "socket.io";
 import { findUserById } from "./helper/findUsers";
-import type { mockUser } from "./users";
+import { RoomState, PeerState } from "./helper/types";
+import {
+  handleKickPeer,
+  handleMutePeer,
+  handleStopVideoPeer,
+} from "./helper/organizePower";
 
 let worker: mediasoup.types.Worker;
 
-const rooms: Record<
-  string,
-  {
-    router: Router;
-    organizerId?: string; // Tracks the meeting organizer
-    peers: Set<string>;
-    breakoutRooms?: string[];
-    assignments?: Map<string, string>;
-  }
-> = {};
-const peers: Record<
-  string,
-  {
-    socket: Socket;
-    user: mockUser;
-    roomName: string;
-    transports: Map<string, mediasoup.types.Transport>;
-    producers: Map<string, mediasoup.types.Producer>;
-    consumers: Map<string, mediasoup.types.Consumer>;
-  }
-> = {};
-
+export const rooms: Record<string, RoomState> = {};
+export const peers: Record<string, PeerState> = {};
 const createWorker = async () => {
   try {
     worker = await mediasoup.createWorker({
@@ -113,11 +98,7 @@ export const initMediasoup = async (io: any) => {
         }
         if (peer) {
           cleanupPeer(socket.id);
-          peer.producers.forEach((producer) => {
-            producer.close(); // This will notify all consumers
-          });
 
-          peer.transports.forEach((transport) => transport.close());
           delete peers[socket.id];
         }
       });
@@ -151,6 +132,9 @@ export const initMediasoup = async (io: any) => {
           transports: new Map(),
           producers: new Map(),
           consumers: new Map(),
+          // ✅ Initialize media state (assume starts enabled, adjust if needed)
+          hasAudio: false, // Will be set true when producer is created
+          hasVideo: false, // Will be set true when producer is created
         };
         socket.join(roomName);
 
@@ -185,20 +169,7 @@ export const initMediasoup = async (io: any) => {
           });
         }
 
-        const participantList = Array.from(rooms[roomName].peers)
-          .map((id) => {
-            const peer = peers[id];
-            const isPeerOrganizer =
-              peer.user.role === "Admin" || peer.user.role === "Manager";
-
-            return {
-              id,
-              userId: peer.user.id,
-              name: peer?.user.name || "Unknown",
-              isOrganizer: isPeerOrganizer, // Role is checked for EVERYONE
-            };
-          })
-          .filter(Boolean);
+        const participantList = getParticipantListForRoom(roomName);
 
         connections.to(roomName).emit("room-participants", participantList);
 
@@ -263,11 +234,17 @@ export const initMediasoup = async (io: any) => {
       socket.on(
         "transport-produce",
         async ({ kind, rtpParameters, transportId }, callback) => {
-          const transport = peers[socket.id]?.transports.get(transportId);
+          const peer = peers[socket.id];
+          const transport = peer?.transports.get(transportId);
           if (!transport) return;
           const producer = await transport.produce({ kind, rtpParameters });
           const { roomName } = peers[socket.id];
-          peers[socket.id].producers.set(producer.id, producer); // Inform other peers
+          peer.producers.set(producer.id, producer); // Inform other peers
+          if (kind === "audio") {
+            peer.hasAudio = true;
+          } else if (kind === "video") {
+            peer.hasVideo = true;
+          }
 
           for (const peerId of rooms[roomName].peers) {
             if (peerId !== socket.id) {
@@ -277,6 +254,9 @@ export const initMediasoup = async (io: any) => {
               });
             }
           }
+          const participantList = getParticipantListForRoom(roomName);
+          connections.to(roomName).emit("room-participants", participantList);
+          console.log(participantList);
           callback({ id: producer.id });
         }
       );
@@ -303,10 +283,17 @@ export const initMediasoup = async (io: any) => {
 
       //
       socket.on("producer-close", ({ producerId }) => {
-        const { roomName } = peers[socket.id];
-        const producer = peers[socket.id]?.producers.get(producerId);
-        if (!producer) return;
+        const peer = peers[socket.id];
+        if (!peer) return;
+        const { roomName } = peer;
 
+        const producer = peer?.producers.get(producerId);
+        if (!producer) return;
+        if (producer.kind === "audio") {
+          peer.hasAudio = false;
+        } else if (producer.kind === "video") {
+          peer.hasVideo = false;
+        }
         producer.close();
         peers[socket.id].producers.delete(producerId);
 
@@ -317,6 +304,8 @@ export const initMediasoup = async (io: any) => {
             });
           }
         }
+        const participantList = getParticipantListForRoom(roomName);
+        connections.to(roomName).emit("room-participants", participantList);
       });
       //
 
@@ -377,6 +366,54 @@ export const initMediasoup = async (io: any) => {
         }
       });
       //
+      //  /////organizer powers/////
+      socket.on("organizer:mute-peer", ({ targetPeerId }) => {
+        const result = handleMutePeer(socket.id, targetPeerId);
+        // Broadcast ONLY if the state was successfully changed
+        if (result.success && result.roomName) {
+          const participantList = getParticipantListForRoom(result.roomName);
+          connections
+            .to(result.roomName)
+            .emit("room-participants", participantList);
+        }
+      });
+
+      socket.on("organizer:stop-video-peer", ({ targetPeerId }) => {
+        const organizer = peers[socket.id];
+        if (
+          !organizer ||
+          (organizer.user.role !== "Admin" && organizer.user.role !== "Manager")
+        ) {
+          console.warn("Non-organizer attempted to stop video.");
+          return;
+        }
+
+        const result = handleStopVideoPeer(socket.id, targetPeerId);
+        if (result.success && result.roomName) {
+          const participantList = getParticipantListForRoom(result.roomName);
+          connections
+            .to(result.roomName)
+            .emit("room-participants", participantList);
+        }
+      });
+
+      socket.on("organizer:kick-peer", ({ targetPeerId }) => {
+        const organizer = peers[socket.id];
+        if (
+          !organizer ||
+          (organizer.user.role !== "Admin" && organizer.user.role !== "Manager")
+        ) {
+          console.warn("Non-organizer attempted to kick peer.");
+          return;
+        }
+
+        const result = handleKickPeer(socket.id, targetPeerId);
+        // The broadcast update is handled by the main 'disconnect' event
+        if (result.success) {
+          console.log(`Kick command successful for ${targetPeerId}`);
+        }
+      });
+      //
 
       // ///brakout logic////
 
@@ -406,6 +443,8 @@ export const initMediasoup = async (io: any) => {
               userId: peerData.user.id,
               name: peerData.user.name,
               isOrganizer: isPeerOrganizer,
+              hasAudio: peerData.hasAudio,
+              hasVideo: peerData.hasVideo,
             };
           })
           .filter(Boolean);
@@ -413,10 +452,10 @@ export const initMediasoup = async (io: any) => {
       //
       socket.on("client:ready-for-new-room", async ({ newRoomName }) => {
         const peer = peers[socket.id];
-        if (!peer || !rooms[newRoomName]){
+        if (!peer || !rooms[newRoomName]) {
           console.error(`Invalid peer or room: ${socket.id}, ${newRoomName}`);
           return;
-        } 
+        }
 
         const oldRoomName = peer.roomName;
         console.log(
@@ -589,41 +628,7 @@ export const initMediasoup = async (io: any) => {
         broadcastBreakoutState(mainRoomName);
       });
       //
-      // const cleanupPeerMediasoupObjects = (socketId: string) => {
-      //   const peer = peers[socketId];
-      //   if (!peer) return;
-
-      //   // Close consumers first
-      //   peer.consumers.forEach((consumer) => {
-      //     try {
-      //       if (!consumer.closed) consumer.close();
-      //     } catch (error) {
-      //       console.error("Error closing consumer:", error);
-      //     }
-      //   });
-
-      //   // Then producers
-      //   peer.producers.forEach((producer) => {
-      //     try {
-      //       if (!producer.closed) producer.close();
-      //     } catch (error) {
-      //       console.error("Error closing producer:", error);
-      //     }
-      //   });
-
-      //   // Finally transports
-      //   peer.transports.forEach((transport) => {
-      //     try {
-      //       if (!transport.closed) transport.close();
-      //     } catch (error) {
-      //       console.error("Error closing transport:", error);
-      //     }
-      //   });
-
-      //   peer.producers.clear();
-      //   peer.consumers.clear();
-      //   peer.transports.clear();
-      // };
+     
       //
 
       const cleanupPeer = (socketId: string) => {
