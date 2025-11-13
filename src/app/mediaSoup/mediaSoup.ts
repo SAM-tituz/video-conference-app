@@ -1,4 +1,4 @@
-import "dotenv/config"
+import "dotenv/config";
 import io, { type Socket } from "socket.io-client";
 import * as mediasoupClient from "mediasoup-client";
 
@@ -7,6 +7,9 @@ type Producer = mediasoupClient.types.Producer;
 type Consumer = mediasoupClient.types.Consumer;
 type Device = mediasoupClient.types.Device;
 
+import { Participant } from "@/lib/provider/ParticipantContext";
+import { Message } from "@/lib/provider/ChatContext";
+
 type MediaSoupClientOptions = {
   onLocalStream: (stream: MediaStream) => void;
   onRemoteStream: (
@@ -14,14 +17,13 @@ type MediaSoupClientOptions = {
     stream: MediaStream,
     kind: "audio" | "video"
   ) => void;
-  onParticipantList: (
-    participants: { id: string; name: string; isOrganizer: boolean }[]
-  ) => void;
+  onParticipantList: (participants: Participant[]) => void;
   onRemoteTrackRemoved: (peerId: string, track: MediaStreamTrack) => void;
   // onForceMove: (data: { roomName: string }) => void;
   onBreakoutState: (data: {
     breakoutRoomNames: string[];
     assignments: [string, string][];
+    mainRoomParticipants?: Participant[];
   }) => void;
   onMoveConfirmed: (data: {
     newRoomName: string;
@@ -30,7 +32,8 @@ type MediaSoupClientOptions = {
   onForceMute: () => void;
   onForceStopVideo: () => void;
   onKicked: () => void;
-  
+  onNewPublicMessage: (message: Message) => void; // ✅ Renamed
+  onNewPrivateMessage: (message: Message, otherUserId: string) => void;
 };
 
 let screenProducer: Producer | null = null;
@@ -38,10 +41,11 @@ let screenProducer: Producer | null = null;
 export default function mediaSoupClient(
   roomName: string,
   participantId: string,
+  userName: string,
   options: MediaSoupClientOptions
 ) {
   let isClosed = false;
-  const serverUrl = process.env.NEXT_PUBLIC_MEDIASOUP_CLIENT_URL
+  const serverUrl = process.env.NEXT_PUBLIC_MEDIASOUP_CLIENT_URL;
   const socket: Socket = io(`${serverUrl}/mediasoup`);
   const consumers = new Map<string, Consumer>();
   const producerToPeerMap = new Map<string, string>();
@@ -138,7 +142,11 @@ export default function mediaSoupClient(
 
     socket.emit(
       "joinRoom",
-      { roomName: currentRoomName, participantId: participantId },
+      {
+        roomName: currentRoomName,
+        participantId: participantId,
+        participantName: userName,
+      },
       async (data: {
         rtpCapabilities: mediasoupClient.types.RtpCapabilities;
       }) => {
@@ -148,7 +156,6 @@ export default function mediaSoupClient(
     );
   };
 
- 
   //  Listen for the server's command to move.
   socket.on("server:prepare-to-move", ({ newRoomName }) => {
     prepareToMove(newRoomName);
@@ -159,12 +166,9 @@ export default function mediaSoupClient(
     currentRoomName = newRoomName;
     options.onMoveConfirmed({ newRoomName, rtpCapabilities });
   });
-  socket.on(
-    "room-participants",
-    (participants: { id: string; name: string; isOrganizer: boolean }[]) => {
-      options.onParticipantList(participants);
-    }
-  );
+  socket.on("room-participants", (participants) => {
+    options.onParticipantList(participants);
+  });
 
   // It handles creation, assignments, and ending of breakouts all at once.
   socket.on(
@@ -172,6 +176,7 @@ export default function mediaSoupClient(
     (data: {
       breakoutRoomNames: string[];
       assignments: [string, string][];
+      mainRoomParticipants: Participant[];
     }) => {
       console.log("Received synchronized breakout state:", data);
       options.onBreakoutState(data);
@@ -203,8 +208,6 @@ export default function mediaSoupClient(
     // We don't need to send any data; the server knows who we are from our socket.id
     socket.emit("peer:exitBreakoutRoom");
   };
-
-
 
   const createSendTransport = async () => {
     return new Promise<void>((resolve) => {
@@ -424,7 +427,28 @@ export default function mediaSoupClient(
     console.log(`Requesting server to kick peer: ${peerId}`);
     socket.emit("organizer:kick-peer", { targetPeerId: peerId });
   };
+  const endMeeting = () => {
+    const mainRoomName = currentRoomName.split("-breakout-")[0];
+    console.log(`Requesting server to end meeting: ${mainRoomName}`);
+    socket.emit("organizer:end-meeting", { mainRoomName });
+  };
 
+  const muteAllPeers = () => {
+    console.log("Requesting server to mute all peers.");
+    socket.emit("organizer:mute-all");
+  };
+
+  const transferRole = (targetUserId: string) => {
+    console.log(`Requesting server to transfer role to: ${targetUserId}`);
+    socket.emit("organizer:transfer-role", { targetUserId });
+  };
+  const sendPublicMessage = (text: string) => {
+    socket.emit("peer:send-public-message", { text });
+  };
+
+  const sendPrivateMessage = (text: string, targetUserId: string) => {
+    socket.emit("peer:send-private-message", { text, targetUserId });
+  };
   // --- Listen for Server Commands ---
   socket.on("server:force-mute", () => {
     console.log("Received force mute command from server.");
@@ -449,6 +473,21 @@ export default function mediaSoupClient(
     options.onKicked();
 
     // The VideoCall component should handle redirecting on cleanup/context change
+  });
+
+socket.on("room:new-public-message", (message: Message) => {
+    options.onNewPublicMessage(message);
+  });
+
+  socket.on("room:new-private-message", ({ message, targetUserId }) => {
+    // This logic handles both sending and receiving
+    if (targetUserId) {
+      // I am the SENDER. The "other person" is the targetUserId.
+      options.onNewPrivateMessage(message, targetUserId);
+    } else {
+      // I am the RECEIVER. The "other person" is the message.senderId.
+      options.onNewPrivateMessage(message, message.senderId);
+    }
   });
   // /
   const cleanup = () => {
@@ -497,5 +536,10 @@ export default function mediaSoupClient(
     remoteMutePeer,
     remoteStopVideoPeer,
     kickPeer,
+    sendPublicMessage, 
+    sendPrivateMessage,
+    endMeeting,
+    muteAllPeers, 
+    transferRole,
   };
 }

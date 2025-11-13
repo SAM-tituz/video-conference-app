@@ -18,37 +18,58 @@ import {
   VideoOff,
   MoreVertical,
   LogOut,
-} from "lucide-react"; // Import new icons
+  Shield,
+  ShieldAlert,
+  MessageSquare,
+} from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-interface Participant {
-  id: string;
-  name: string;
-  isLocal: boolean;
-  isOrganizer?: boolean;
-  hasAudio?: boolean;
-  hasVideo?: boolean;
-}
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { useParticipant, Participant } from "@/lib/provider/ParticipantContext";
+import { useState } from "react";
+import { useChat } from "@/lib/provider/ChatContext";
 
-interface ParticipantsPanelProps {
-  participants: Participant[];
-  isCurrentUserOrganizer: boolean; // Is the viewing user an organizer?
-  onRemoteMute: (peerId: string) => void;
-  onRemoteStopVideo: (peerId: string) => void;
-  onKickPeer: (peerId: string) => void;
-}
+export const ParticipantsPanel = () => {
+  const {
+    participants,
+    isOrganizer,
+    kickPeer,
+    remoteMutePeer,
+    remoteStopVideoPeer,
+    muteAllPeers,
+    transferRole,
+  } = useParticipant();
 
-export const ParticipantsPanel = ({
-  participants,
-  isCurrentUserOrganizer,
-  onRemoteMute,
-  onRemoteStopVideo,
-  onKickPeer,
-}: ParticipantsPanelProps) => {
+  const { setIsChatOpen, setCurrentChatTarget } = useChat();
+  const [peerToPromote, setPeerToPromote] = useState<Participant | null>(null);
+
+  const handleConfirmTransfer = () => {
+    if (peerToPromote) {
+      // ✅ FIX: Send the permanent userId, not the temporary socket.id
+      transferRole(peerToPromote.userId);
+      setPeerToPromote(null); // Close the dialog
+    }
+  };
+
+  const handleStartPrivateChat = (p: Participant) => {
+    setCurrentChatTarget(p); // Switch chat to this user
+    setIsChatOpen(true); // Open the panel
+  };
+
   return (
     <Sheet>
       <SheetTrigger asChild>
@@ -64,31 +85,43 @@ export const ParticipantsPanel = ({
         </SheetHeader>
         <SheetDescription className="sr-only" />
 
-        <ScrollArea className="h-[calc(100%-4rem)] mt-4">
+        {isOrganizer && (
+          <div className="mt-4">
+            <button
+              onClick={muteAllPeers}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+            >
+              <MicOff className="w-5 h-5" /> Mute All
+            </button>
+          </div>
+        )}
+
+        <ScrollArea className="h-[calc(100%-8rem)] mt-4">
           <div className="space-y-4">
             {participants.map((p) => (
               <div
                 key={p.id}
                 className="flex items-center justify-between gap-3 group"
               >
-                {" "}
-                {/* Added justify-between */}
                 <div className="flex items-center gap-3 flex-1 min-w-0">
-                  {" "}
-                  {/* Allow shrinking */}
                   <Avatar>
                     <AvatarFallback className="bg-indigo-600 text-white">
                       {p.name ? p.name.charAt(0).toUpperCase() : "?"}
                     </AvatarFallback>
                   </Avatar>
-                  <span className="truncate">
-                    {" "}
-                    {/* Prevent long names overflowing */}
-                    {p.name || `Peer-${p.id.slice(0, 4)}`}{" "}
-                    {p.isLocal && "(You)"}
-                  </span>
+                  <div className="flex flex-col truncate">
+                    <span className="truncate">
+                      {p.name || `Peer-${p.id.slice(0, 4)}`}
+                      {p.isLocal && " (You)"}
+                    </span>
+                    {p.isOrganizer && (
+                      <span className="text-xs text-yellow-400 flex items-center gap-1">
+                        <Shield className="w-3 h-3" /> Organizer
+                      </span>
+                    )}
+                  </div>
                 </div>
-                {/* Media Status Icons */}
+
                 <div className="flex items-center gap-2">
                   {p.hasAudio ? (
                     <Mic className="w-4 h-4 text-green-400" />
@@ -101,35 +134,58 @@ export const ParticipantsPanel = ({
                     <VideoOff className="w-4 h-4 text-red-400" />
                   )}
                 </div>
-                {/* Organizer Menu (Show only if viewer is organizer AND target is not self) */}
-                {isCurrentUserOrganizer && !p.isLocal && (
+
+                {/* ✅ FIX: Show dropdown for everyone, but control items inside */}
+                {!p.isLocal && (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <button className="p-1 rounded-full text-gray-400 hover:bg-gray-700  transition-opacity">
-                        {" "}
-                        {/* Initially hidden */}
+                      <button className="p-1 rounded-full text-gray-400 hover:bg-gray-700 transition-opacity">
                         <MoreVertical className="w-5 h-5" />
                       </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent className="bg-gray-800 text-white border-gray-700">
+                      {/* --- Item for EVERYONE --- */}
                       <DropdownMenuItem
-                        onSelect={() => onRemoteMute(p.id)}
+                        onSelect={() => handleStartPrivateChat(p)}
                         className="hover:bg-gray-700 cursor-pointer"
                       >
-                        <MicOff className="w-4 h-4 mr-2" /> Mute Audio
+                        <MessageSquare className="w-4 h-4 mr-2" /> Send Private
+                        Message
                       </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onSelect={() => onRemoteStopVideo(p.id)}
-                        className="hover:bg-gray-700 cursor-pointer"
-                      >
-                        <VideoOff className="w-4 h-4 mr-2" /> Stop Video
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onSelect={() => onKickPeer(p.id)}
-                        className="text-red-400 hover:bg-red-900 hover:text-red-300 cursor-pointer"
-                      >
-                        <LogOut className="w-4 h-4 mr-2" /> Kick Out
-                      </DropdownMenuItem>
+
+                      {/* --- Items for ORGANIZER ONLY --- */}
+                      {isOrganizer && (
+                        <>
+                          {!p.isOrganizer && (
+                            <DropdownMenuItem
+                              onSelect={() => setPeerToPromote(p)}
+                              className="hover:bg-gray-700 cursor-pointer text-yellow-400 hover:text-yellow-300"
+                            >
+                              <ShieldAlert className="w-4 h-4 mr-2" /> Make
+                              Organizer
+                            </DropdownMenuItem>
+                          )}
+                          <DropdownMenuItem
+                            onSelect={() => remoteMutePeer(p.id)}
+                            className="hover:bg-gray-700 cursor-pointer"
+                          >
+                            <MicOff className="w-4 h-4 mr-2" /> Mute Audio
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => remoteStopVideoPeer(p.id)}
+                            className="hover:bg-gray-700 cursor-pointer"
+                          >
+                            <VideoOff className="w-4 h-4 mr-2" /> Stop Video
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator className="bg-gray-700" />
+                          <DropdownMenuItem
+                            onSelect={() => kickPeer(p.id)}
+                            className="text-red-400 hover:bg-red-900 hover:text-red-300 cursor-pointer"
+                          >
+                            <LogOut className="w-4 h-4 mr-2" /> Kick Out
+                          </DropdownMenuItem>
+                        </>
+                      )}
                     </DropdownMenuContent>
                   </DropdownMenu>
                 )}
@@ -137,6 +193,38 @@ export const ParticipantsPanel = ({
             ))}
           </div>
         </ScrollArea>
+
+        <AlertDialog
+          open={!!peerToPromote}
+          onOpenChange={(isOpen) => !isOpen && setPeerToPromote(null)}
+        >
+          {/* ... (no changes to AlertDialog) ... */}
+          <AlertDialogContent className="bg-gray-800 text-white border-gray-700">
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                Make {peerToPromote?.name} the organizer?
+              </AlertDialogTitle>
+              <AlertDialogDescription className="text-gray-400">
+                You will no longer be the organizer and will lose all moderation
+                controls.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel
+                onClick={() => setPeerToPromote(null)}
+                className="bg-gray-700 hover:bg-gray-600 border-none"
+              >
+                Cancel
+              </AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleConfirmTransfer}
+                className="bg-yellow-600 hover:bg-yellow-700"
+              >
+                Confirm
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </SheetContent>
     </Sheet>
   );

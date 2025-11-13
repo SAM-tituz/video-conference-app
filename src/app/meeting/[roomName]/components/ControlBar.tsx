@@ -3,6 +3,7 @@
 
 import React, { useState } from "react";
 import { ParticipantsPanel } from "./ParticipantsPanel";
+import { ChatPanel } from "./ChatPanel";
 import {
   Mic,
   MicOff,
@@ -10,34 +11,19 @@ import {
   VideoOff,
   ScreenShare,
   PhoneOff,
-  Users,
-  MessageSquare,
 } from "lucide-react";
+import { BreakoutPanel } from "./BreakoutPanel";
+import { usePeer } from "@/lib/provider/PeerContext";
+import { useParticipant } from "@/lib/provider/ParticipantContext";
+import { useBreakoutRoom } from "@/lib/provider/BreakoutRoomContext";
 
 interface ControlBarProps {
-  isMuted: boolean;
-  isVideoOn: boolean;
-  isOrganizer: boolean;
-  breakoutRooms: string[];
-  assignments: Map<string, string>;
-  onToggleMute: () => void;
-  onToggleVideo: () => void;
-  onScreenShare: () => void;
   onLeave: () => void;
-  onCreateRooms: (numRooms: number) => void;
-  onAssignPeer: (peerId: string, roomName: string) => void;
-  onStartBreakouts: () => void;
-  onEndBreakouts: () => void;
-  participants: any[];
-  onExitBreakout: () => void;
   roomName: string;
-  onRemoteMute: (peerId: string) => void;
-  onRemoteStopVideo: (peerId: string) => void;
-  onKickPeer: (peerId: string) => void;
 }
 
 // Reusable circular button
-const ControlButton = ({
+export const ControlButton = ({
   onClick,
   children,
   className = "",
@@ -56,158 +42,36 @@ const ControlButton = ({
     {children}
   </button>
 );
-// /////////////////////////////
-const BreakoutPanel = ({
-  mainRoomParticipants,
-  breakoutRooms,
-  assignments,
-  onAssignPeer,
-  onCreateRooms,
-  onStartBreakouts,
-  onEndBreakouts,
-  roomName,
-}: {
-  mainRoomParticipants: { id: string; name: string; isLocal: boolean }[];
-  breakoutRooms: string[];
-  assignments: Map<string, string>;
-  onCreateRooms: (numRooms: number) => void;
-  onAssignPeer: (peerId: string, roomName: string) => void;
-  onStartBreakouts: () => void;
-  onEndBreakouts: () => void;
-  roomName: string;
-}) => {
-  const [numRooms, setNumRooms] = useState(2);
-  const [isOpen, setIsOpen] = useState(false);
-  const mainRoomName = roomName.split("-breakout-")[0];
-  const assignableRooms = [
-    { name: "Main Room", value: mainRoomName },
-    ...breakoutRooms.map((r) => ({
-      name: `Breakout ${r.split("-").pop()}`,
-      value: r,
-    })),
-  ];
-  // const mainRoomParticipants = mainRoomParticipants;
-
-  return (
-    <>
-      <ControlButton
-        onClick={() => setIsOpen(true)}
-        className="bg-gray-700 hover:bg-gray-600"
-      >
-        <Users className="w-6 h-6" />
-      </ControlButton>
-      {isOpen && (
-        <>
-          <div
-            onClick={() => setIsOpen(false)}
-            className="fixed inset-0 bg-black bg-opacity-50 z-40"
-          ></div>
-          <div className="fixed top-0 right-0 h-full w-full max-w-md bg-gray-900 border-l border-gray-700 text-white flex flex-col z-50 p-6 shadow-lg">
-            <header className="flex items-center justify-between pb-4 border-b border-gray-700">
-              <h2 className="text-xl font-semibold">Breakout Rooms</h2>
-              <button
-                onClick={() => setIsOpen(false)}
-                className="text-gray-400 text-2xl hover:text-white"
-              >
-                &times;
-              </button>
-            </header>
-
-            {breakoutRooms.length === 0 ? (
-              <div className="mt-6 space-y-4">
-                <p className="text-gray-300">
-                  Create rooms to assign participants.
-                </p>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min="1"
-                    value={numRooms}
-                    onChange={(e) =>
-                      setNumRooms(parseInt(e.target.value, 10) || 1)
-                    }
-                    className="bg-gray-800 border-gray-700 text-white w-20 rounded-md p-2"
-                  />
-                  <button
-                    onClick={() => onCreateRooms(numRooms)}
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-md"
-                  >
-                    Create
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="mt-6 flex flex-col flex-1">
-                <div className="space-x-2">
-                  <button
-                    onClick={onStartBreakouts}
-                    className="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-md"
-                  >
-                    Start Breakouts
-                  </button>
-                  <button
-                    onClick={onEndBreakouts}
-                    className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-md"
-                  >
-                    End Breakouts
-                  </button>
-                </div>
-                <div className="flex-1 mt-6 overflow-y-auto">
-                  <h3 className="font-semibold mb-2">Assignments</h3>
-                  {mainRoomParticipants.map((p) => (
-                    <div
-                      key={p.id}
-                      className="flex items-center justify-between p-2 bg-gray-800 rounded-md mb-2"
-                    >
-                      <span className="truncate">{p.name}</span>
-                      <select
-                        value={assignments.get(p.id) || "main"}
-                        onChange={(e) => onAssignPeer(p.id, e.target.value)}
-                        className="w-[180px] bg-gray-700 border-gray-600 text-white rounded p-2"
-                      >
-                        {assignableRooms.map((room) => (
-                          <option key={room.value} value={room.value}>
-                            {room.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        </>
-      )}
-    </>
-  );
-};
-
 // ////////////////////////////
-export const ControlBar = ({
-  isMuted,
-  isVideoOn,
-  isOrganizer,
-  breakoutRooms,
-  assignments,
-  onToggleVideo,
-  onToggleMute,
-  onScreenShare,
-  onLeave,
-  onCreateRooms,
-  onAssignPeer,
-  onStartBreakouts,
-  onEndBreakouts,
-  participants,
-  mainRoomParticipants,
-  onExitBreakout,
-  roomName,
-  onRemoteMute,
-  onRemoteStopVideo,
-  onKickPeer,
-}: ControlBarProps & { mainRoomParticipants: any[] }) => {
+export const ControlBar = ({ onLeave, roomName }: ControlBarProps) => {
+  const { isMuted, isVideoOn, toggleMute, toggleVideo, toggleScreenShare } =
+    usePeer();
+  const { endMeeting, isOrganizer } = useParticipant();
+  const [showLeaveModal, setShowLeaveModal] = useState(false);
+  const { exitBreakoutRoom } = useBreakoutRoom();
   const isInBreakout = roomName.includes("-breakout-");
 
+  const handleLeaveClick = () => {
+    if (isOrganizer) {
+      // Organizer: show the modal
+      setShowLeaveModal(true);
+    } else {
+      // Regular peer: just leave
+      onLeave();
+    }
+  };
+
+  const handleEndMeeting = () => {
+    if (endMeeting) {
+      endMeeting(); // 1. Tell server to kick everyone
+    }
+    onLeave(); // 2. Clean up this client and leave
+    setShowLeaveModal(false);
+  };
+  const handleJustLeave = () => {
+    onLeave(); // Just clean up this client and leave
+    setShowLeaveModal(false);
+  };
   return (
     <div className="bg-gray-900 px-6 py-3 flex items-center justify-between">
       {/* Left Side: Meeting Title */}
@@ -216,7 +80,7 @@ export const ControlBar = ({
       {/* Center Controls */}
       <div className="flex items-center justify-center gap-4 w-1/2">
         <ControlButton
-          onClick={onToggleMute}
+          onClick={toggleMute}
           className={
             isMuted
               ? "bg-red-600 hover:bg-red-700"
@@ -226,7 +90,7 @@ export const ControlBar = ({
           {isMuted ? <MicOff /> : <Mic />}
         </ControlButton>
         <ControlButton
-          onClick={onToggleVideo}
+          onClick={toggleVideo}
           className={
             !isVideoOn
               ? "bg-red-600 hover:bg-red-700"
@@ -236,34 +100,23 @@ export const ControlBar = ({
           {isVideoOn ? <Video /> : <VideoOff />}
         </ControlButton>
 
-        {isOrganizer && (
-          <BreakoutPanel
-            mainRoomParticipants={mainRoomParticipants}
-            breakoutRooms={breakoutRooms}
-            assignments={assignments}
-            onCreateRooms={onCreateRooms}
-            onAssignPeer={onAssignPeer}
-            onStartBreakouts={onStartBreakouts}
-            onEndBreakouts={onEndBreakouts}
-            roomName={roomName}
-          />
-        )}
+        {isOrganizer && <BreakoutPanel roomName={roomName} />}
         <ControlButton
-          onClick={onScreenShare}
+          onClick={toggleScreenShare}
           className="bg-gray-700 hover:bg-gray-600"
         >
           <ScreenShare />
         </ControlButton>
         {isInBreakout && (
           <ControlButton
-            onClick={onExitBreakout}
+            onClick={exitBreakoutRoom}
             className="bg-blue-600 hover:bg-blue-700 !w-auto px-4"
           >
             Return to Main Room
           </ControlButton>
         )}
         <ControlButton
-          onClick={onLeave}
+          onClick={handleLeaveClick}
           className="bg-red-600 hover:bg-red-700 !w-16"
         >
           <PhoneOff />
@@ -271,22 +124,41 @@ export const ControlBar = ({
       </div>
 
       {/* Right Side Controls */}
-      <div className="flex items-center justify-end gap-4 w-1/4">
-        <ParticipantsPanel
-          participants={participants}
-          isCurrentUserOrganizer={isOrganizer} // Pass down organizer status
-          onRemoteMute={onRemoteMute} // Pass down handler
-          onRemoteStopVideo={onRemoteStopVideo} // Pass down handler
-          onKickPeer={onKickPeer} // Pass down handler
-        />
-        <ControlButton
-          onClick={() => {}}
-          className="bg-transparent hover:bg-gray-700"
-          disabled
-        >
-          <MessageSquare />
-        </ControlButton>
+      <div className="flex items-center justify-end gap-1 w-1/4">
+        <ParticipantsPanel />
+        <ChatPanel />
       </div>
+      {showLeaveModal && (
+        <div className="absolute inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+          <div className="bg-gray-800 p-6 rounded-lg shadow-xl text-white max-w-sm w-full">
+            <h3 className="text-xl font-bold mb-4">Leave Meeting</h3>
+            <p className="mb-6">
+              As the organizer, you can either end the meeting for everyone or
+              just leave.
+            </p>
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={handleEndMeeting}
+                className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded"
+              >
+                End Meeting for All
+              </button>
+              <button
+                onClick={handleJustLeave}
+                className="w-full bg-gray-600 hover:bg-gray-700 text-white font-semibold py-2 px-4 rounded"
+              >
+                Leave Meeting
+              </button>
+              <button
+                onClick={() => setShowLeaveModal(false)}
+                className="w-full text-gray-400 hover:text-white text-sm py-1"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

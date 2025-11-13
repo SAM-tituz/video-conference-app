@@ -21,6 +21,7 @@ export default function Home() {
   const [roomName, setRoomName] = useState('');
 useEffect(() => {
     if (!user) {
+    
       // If no user is logged in, redirect to the login page
       router.push('/login');
       return;
@@ -61,9 +62,6 @@ useEffect(() => {
                 Your name: {user?.name}
               </label>
             
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Your role: {user?.role}
-              </label>
             
             </div>
 

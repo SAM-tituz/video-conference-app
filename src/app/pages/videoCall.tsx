@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo, use } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/provider/authprovider";
-import { useMediaSoup } from "../mediaSoup/MediaSoupContext";
 import { ControlBar } from "../meeting/[roomName]/components/ControlBar";
+import { usePeer } from "@/lib/provider/PeerContext";
+import { useParticipant } from "@/lib/provider/ParticipantContext";
 
 const VideoTile = ({
   stream,
@@ -21,12 +22,6 @@ const VideoTile = ({
 
   useEffect(() => {
     if (videoRef.current && stream) {
-      console.log(
-        "Setting video srcObject:",
-        stream,
-        "Tracks:",
-        stream.getTracks()
-      );
       videoRef.current.srcObject = stream;
       videoRef.current
         .play()
@@ -35,7 +30,6 @@ const VideoTile = ({
   }, [stream]);
 
   if (!stream || stream.getVideoTracks().length === 0) {
-    console.log("No video tracks in stream:", stream?.getTracks());
     return null;
   }
 
@@ -69,36 +63,17 @@ export default function VideoCall() {
     currentRoomName,
     localStream,
     remoteStreams,
-    participants,
-    breakoutRooms,
-    assignments,
-    isOrganizer,
     initialize,
-    toggleVideo, // From context
-    toggleMute, // From context
-    toggleScreenShare,
-    remoteMutePeer,
-    remoteStopVideoPeer,
-    kickPeer,
     isKicked,
-  } = useMediaSoup();
+  } = usePeer();
+  const { participants } = useParticipant();
   const [presenterId, setPresenterId] = useState<string>("local");
   const presenterVideoRef = useRef<HTMLVideoElement>(null);
-  const { isVideoOn, isMuted, isScreenSharing } = useMemo(
-    () => ({
-      isVideoOn: !!localStream?.getVideoTracks().length,
-      isMuted:
-        !localStream?.getAudioTracks().length ||
-        !localStream?.getAudioTracks()[0]?.enabled,
-      isScreenSharing: !!localStream
-        ?.getVideoTracks()
-        .find((t) => t.label.includes("screen")), // Adjust check as needed
-    }),
-    [localStream]
-  );
+  //
   useEffect(() => {
-    if (!roomName || !user || !participantId) return;
-    initialize(roomName, participantId);
+    if (!roomName || !user || !participantId || !user.name) return;
+    initialize(roomName, participantId, user.name);
+    console.log("Initializing peer client for room:", roomName, "participant:", participantId);
   }, [roomName, user, participantId, initialize]);
 
   useEffect(() => {
@@ -108,27 +83,18 @@ export default function VideoCall() {
   }, [currentRoomName, roomName, router]);
 
   const handleLeave = useCallback(() => {
-    client?.cleanup();
-    router.push("/");
-  }, [client, router]);
+    setTimeout(() => {
+      router.push("/");
+    }, 100);
+  }, [ router]);
+
   useEffect(() => {
     if (isKicked) {
-      alert("You have been removed from the meeting by the organizer.");
       handleLeave();
+      alert("You have been removed from the meeting by the organizer.");
     }
   }, [isKicked, handleLeave]);
 
-  const handleCreateRooms = (numRooms: number) => {
-    client?.createBreakoutRooms(numRooms);
-  };
-
-  const handleAssignPeer = (peerId: string, roomName: string) => {
-    client?.assignPeerToRoom(peerId, roomName);
-  };
-
-  const handleStartBreakouts = () => client?.startBreakouts();
-  const handleEndBreakouts = () => client?.endBreakouts();
-  const handleExitBreakout = () => client?.exitBreakoutRoom();
 
   const allParticipants = useMemo(() => {
     const participantsMap = new Map<
@@ -253,28 +219,7 @@ export default function VideoCall() {
             )
         )}
 
-      <ControlBar
-        isMuted={isMuted}
-        isVideoOn={isVideoOn}
-        onToggleMute={toggleMute}
-        onToggleVideo={toggleVideo}
-        onScreenShare={toggleScreenShare}
-        onLeave={handleLeave}
-        participants={participants}
-        mainRoomParticipants={participants}
-        isOrganizer={isOrganizer}
-        breakoutRooms={breakoutRooms}
-        assignments={assignments}
-        onCreateRooms={handleCreateRooms}
-        onAssignPeer={handleAssignPeer}
-        onStartBreakouts={handleStartBreakouts}
-        onEndBreakouts={handleEndBreakouts}
-        onExitBreakout={handleExitBreakout}
-        roomName={roomName}
-        onRemoteMute={remoteMutePeer}
-        onRemoteStopVideo={remoteStopVideoPeer}
-        onKickPeer={kickPeer}
-      />
+      <ControlBar onLeave={handleLeave} roomName={roomName} />
     </div>
   );
 }

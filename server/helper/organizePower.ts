@@ -11,6 +11,17 @@ export const handleMutePeer = (organizerSocketId: string, targetPeerId: string):
     if (targetPeer && targetPeer.hasAudio) {
         console.log(`Organizer ${organizerSocketId} requesting mute for ${targetPeerId}`);
         // Send command to the target client
+
+        const audioProducer = Array.from(targetPeer.producers.values()).find(
+            (prod) => prod.kind === "audio"
+        );
+
+        if (audioProducer) {
+            // 2. Close it directly on the server
+            audioProducer.close();
+            // 3. Remove it from the peer's producer map
+            targetPeer.producers.delete(audioProducer.id);
+        }
         targetPeer.socket.emit('server:force-mute');
 
         // Update server state
@@ -31,6 +42,17 @@ export const handleStopVideoPeer = (organizerSocketId: string, targetPeerId: str
     const targetPeer = peers[targetPeerId];
     if (targetPeer && targetPeer.hasVideo) {
          console.log(`Action: Organizer ${organizerSocketId} requesting stop video for ${targetPeerId}`);
+
+         const videoProducer = Array.from(targetPeer.producers.values()).find(
+            (prod) => prod.kind === "video"
+        );
+
+        if (videoProducer) {
+            // 2. Close it directly on the server
+            videoProducer.close();
+            // 3. Remove it from the peer's producer map
+            targetPeer.producers.delete(videoProducer.id);
+        }
          targetPeer.socket.emit('server:force-stop-video');
          targetPeer.hasVideo = false;
          return { success: true, roomName: targetPeer.roomName };

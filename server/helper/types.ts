@@ -11,7 +11,7 @@ export type RoomState = {
 
 export type PeerState = {
     socket: Socket;
-    user: mockUser;
+    user: {id:string,name:string};
     roomName: string;
     transports: Map<string, mediasoup.types.Transport>;
     producers: Map<string, mediasoup.types.Producer>;

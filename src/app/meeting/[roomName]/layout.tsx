@@ -1,5 +1,5 @@
 // app/layout.tsx
-import { MediaSoupProvider } from "../../mediaSoup/MediaSoupContext";
+import { MediaSoupProvider } from "../../../lib/provider/MediaSoupProvider.tsx";
 
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";

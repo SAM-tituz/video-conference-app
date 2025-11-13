@@ -1,14 +1,13 @@
 import * as mediasoup from "mediasoup";
 type Router = mediasoup.types.Router;
 import { Socket } from "socket.io";
-import { findUserById } from "./helper/findUsers";
 import { RoomState, PeerState } from "./helper/types";
 import {
   handleKickPeer,
   handleMutePeer,
   handleStopVideoPeer,
 } from "./helper/organizePower";
-
+import { randomUUID } from "crypto";
 let worker: mediasoup.types.Worker;
 
 export const rooms: Record<string, RoomState> = {};
@@ -54,27 +53,44 @@ const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
 export const initMediasoup = async (io: any) => {
   try {
     worker = await createWorker();
-    const connections = io.of("/mediasoup");
 
-    // Centralized function to broadcast the complete breakout room state to all organizers.
+    const connections = io.of("/mediasoup"); // Centralized function to broadcast the complete breakout room state to all organizers.
+
     const broadcastBreakoutState = (mainRoomName: string) => {
       const mainRoom = rooms[mainRoomName];
       if (!mainRoom) return;
-
+      const allPeerIds = Object.keys(peers); // This map creates a (ParticipantObject | null)[] array
+      const participantListWithNulls = allPeerIds.map((peerId) => {
+        const peer = peers[peerId]; // Check if peer exists AND is in the main room OR a breakout of that main room
+        if (peer && peer.roomName.startsWith(mainRoomName)) {
+          const isPeerOrganizer = peer.user.id === mainRoom.organizerId;
+          return {
+            id: peer.socket.id,
+            userId: peer.user.id,
+            name: peer.user.name,
+            isOrganizer: isPeerOrganizer,
+            hasAudio: peer.hasAudio,
+            hasVideo: peer.hasVideo,
+          };
+        }
+        return null;
+      });
+      const mainRoomParticipantList = participantListWithNulls.filter(
+        (p): p is NonNullable<typeof p> => p !== null
+      );
       const state = {
         breakoutRoomNames: mainRoom.breakoutRooms ?? [],
         assignments: Array.from(mainRoom.assignments?.entries() ?? []),
+        mainRoomParticipants: mainRoomParticipantList, // This is now correctly typed as T[]
       };
 
-      // Find all organizers in the main room and send them the latest state.
-      Array.from(mainRoom.peers)
-        .map((peerId) => peers[peerId])
-        .filter(
-          (peer) =>
-            peer && (peer.user.role === "Admin" || peer.user.role === "Manager")
-        )
-        .forEach((organizerPeer) => {
-          organizerPeer.socket.emit("organizer:breakoutState", state);
+      mainRoomParticipantList
+        .filter((p) => p.isOrganizer)
+        .forEach((organizer) => {
+          const organizerPeer = peers[organizer.id];
+          if (organizerPeer) {
+            organizerPeer.socket.emit("organizer:breakoutState", state);
+          }
         });
     };
     //
@@ -89,7 +105,10 @@ export const initMediasoup = async (io: any) => {
       socket.on("disconnect", () => {
         console.log("peer disconnected", socket.id);
         const peer = peers[socket.id];
+        if (!peer) return; // Exit if peer already cleaned up
         const roomName = peer.roomName;
+        const mainRoomName = roomName.split("-breakout-")[0];
+
         if (rooms[roomName]) {
           rooms[roomName].peers.delete(socket.id);
           // ✅ When a user disconnects, broadcast the updated list to the remaining peers
@@ -98,10 +117,31 @@ export const initMediasoup = async (io: any) => {
         }
         if (peer) {
           cleanupPeer(socket.id);
-
           delete peers[socket.id];
+          if (rooms[mainRoomName]) {
+            broadcastBreakoutState(mainRoomName);
+          }
         }
       });
+      //
+      // Helper function for checking organizer permissions
+      const isOrganizer = (
+        socketId: string
+      ): { peer: PeerState; mainRoom: RoomState } | false => {
+        const peer = peers[socketId];
+        if (!peer) return false;
+
+        const mainRoomName = peer.roomName.split("-breakout-")[0];
+        const mainRoom = rooms[mainRoomName];
+
+        if (!mainRoom || peer.user.id !== mainRoom.organizerId) {
+          console.warn(
+            `Non-organizer (User: ${peer.user.name}) attempted an action.`
+          );
+          return false;
+        }
+        return { peer, mainRoom };
+      };
 
       //
       const createRoom = async (roomName: string): Promise<Router> => {
@@ -109,92 +149,97 @@ export const initMediasoup = async (io: any) => {
 
         if (!room) {
           const router = await worker.createRouter({ mediaCodecs });
-          room = { router, peers: new Set() };
+          room = {
+            router,
+            peers: new Set(),
+            breakoutRooms: [],
+            assignments: new Map<string, string>(),
+            organizerId: undefined,
+          };
           rooms[roomName] = room;
         }
 
         return room.router;
       };
       //
-      socket.on("joinRoom", async ({ roomName, participantId }, callback) => {
-        let user = findUserById(participantId);
-        if (!user) {
-          console.error(`User with id ${participantId} not found`);
-          return callback({ error: "User not found" });
+      socket.on(
+        "joinRoom",
+        async ({ roomName, participantId, participantName }, callback) => {
+          let user = { id: participantId, name: participantName };
+          if (!user) {
+            console.error(`User with id ${participantId} not found`);
+            return callback({ error: "User not found" });
+          }
+          const router = await createRoom(roomName);
+          rooms[roomName].peers.add(socket.id);
+
+          peers[socket.id] = {
+            socket,
+            roomName,
+            user: user,
+            transports: new Map(),
+            producers: new Map(),
+            consumers: new Map(),
+            hasAudio: false, // Will be set true when producer is created
+            hasVideo: false, // Will be set true when producer is created
+          };
+          socket.join(roomName);
+
+          const mainRoomName = roomName.split("-breakout-")[0];
+          const mainRoom = rooms[mainRoomName];
+          if (!mainRoom) {
+            console.error(
+              `Could not find main room "${mainRoomName}" for a user joining "${roomName}".`
+            );
+            return callback({ error: "Associated main room not found." });
+          }
+          if (roomName === mainRoomName && !mainRoom.organizerId) {
+            mainRoom.organizerId = user.id; // This user is now the organizer
+            console.log(
+              `ORGANIZER SET: ${user.name} (ID: ${user.id}) is the organizer for ${mainRoomName}`
+            );
+          }
+          const isPeerOrganizer = user.id === mainRoom.organizerId;
+
+          if (
+            isPeerOrganizer &&
+            mainRoom.breakoutRooms &&
+            mainRoom.breakoutRooms.length > 0
+          ) {
+            socket.emit("organizer:breakoutState", {
+              breakoutRoomNames: mainRoom.breakoutRooms,
+              assignments: Array.from(mainRoom.assignments?.entries() ?? []),
+            });
+            console.log("breakout state", mainRoom.assignments);
+          }
+
+          const participantList = getParticipantListForRoom(roomName);
+
+          connections.to(roomName).emit("room-participants", participantList);
+
+          if (roomName !== mainRoomName) {
+            const mainRoomList = Array.from(mainRoom.peers)
+              .map((id) => {
+                const peer = peers[id];
+                if (!peer) {
+                  return null;
+                }
+                return {
+                  id,
+                  userId: peer.user.id,
+                  name: peers[id]?.user.name,
+                  isOrganizer: isPeerOrganizer,
+                };
+              })
+              .filter(Boolean);
+            connections
+              .to(mainRoomName)
+              .emit("room-participants", mainRoomList);
+          }
+          broadcastBreakoutState(mainRoomName);
+          callback({ rtpCapabilities: router.rtpCapabilities });
         }
-        const router = await createRoom(roomName);
-        rooms[roomName].peers.add(socket.id);
-
-        peers[socket.id] = {
-          socket,
-          roomName,
-          user: user,
-          transports: new Map(),
-          producers: new Map(),
-          consumers: new Map(),
-          // ✅ Initialize media state (assume starts enabled, adjust if needed)
-          hasAudio: false, // Will be set true when producer is created
-          hasVideo: false, // Will be set true when producer is created
-        };
-        socket.join(roomName);
-
-        const mainRoomName = roomName.split("-breakout-")[0];
-        const mainRoom = rooms[mainRoomName];
-        if (!mainRoom) {
-          console.error(
-            `Could not find main room "${mainRoomName}" for a user joining "${roomName}".`
-          );
-          return callback({ error: "Associated main room not found." });
-        }
-        const isOrganizerRole =
-          user.role === "Admin" || user.role === "Manager";
-
-        if (
-          mainRoom &&
-          !mainRoom.organizerId &&
-          isOrganizerRole &&
-          !roomName.includes("-breakout-")
-        ) {
-          mainRoom.organizerId = user.id;
-        }
-
-        if (
-          isOrganizerRole &&
-          mainRoom.breakoutRooms &&
-          mainRoom.breakoutRooms.length > 0
-        ) {
-          socket.emit("organizer:breakoutState", {
-            breakoutRoomNames: mainRoom.breakoutRooms,
-            assignments: Array.from(mainRoom.assignments?.entries() ?? []),
-          });
-        }
-
-        const participantList = getParticipantListForRoom(roomName);
-
-        connections.to(roomName).emit("room-participants", participantList);
-
-        if (roomName !== mainRoomName) {
-          const mainRoomList = Array.from(mainRoom.peers)
-            .map((id) => {
-              const peer = peers[id];
-              if (!peer) {
-                return null;
-              }
-              const isPeerOrganizer =
-                peer.user.role === "Admin" || peer.user.role === "Manager";
-              return {
-                id,
-                userId: peer.user.id,
-                name: peers[id]?.user.name,
-                isOrganizer: isPeerOrganizer,
-              };
-            })
-            .filter(Boolean);
-          connections.to(mainRoomName).emit("room-participants", mainRoomList);
-        }
-
-        callback({ rtpCapabilities: router.rtpCapabilities });
-      });
+      );
       //
 
       socket.on("createWebRtcTransport", async ({}, callback) => {
@@ -256,7 +301,7 @@ export const initMediasoup = async (io: any) => {
           }
           const participantList = getParticipantListForRoom(roomName);
           connections.to(roomName).emit("room-participants", participantList);
-          console.log(participantList);
+          // console.log(participantList);
           callback({ id: producer.id });
         }
       );
@@ -379,14 +424,7 @@ export const initMediasoup = async (io: any) => {
       });
 
       socket.on("organizer:stop-video-peer", ({ targetPeerId }) => {
-        const organizer = peers[socket.id];
-        if (
-          !organizer ||
-          (organizer.user.role !== "Admin" && organizer.user.role !== "Manager")
-        ) {
-          console.warn("Non-organizer attempted to stop video.");
-          return;
-        }
+        if (!isOrganizer(socket.id)) return;
 
         const result = handleStopVideoPeer(socket.id, targetPeerId);
         if (result.success && result.roomName) {
@@ -398,14 +436,7 @@ export const initMediasoup = async (io: any) => {
       });
 
       socket.on("organizer:kick-peer", ({ targetPeerId }) => {
-        const organizer = peers[socket.id];
-        if (
-          !organizer ||
-          (organizer.user.role !== "Admin" && organizer.user.role !== "Manager")
-        ) {
-          console.warn("Non-organizer attempted to kick peer.");
-          return;
-        }
+        if (!isOrganizer(socket.id)) return;
 
         const result = handleKickPeer(socket.id, targetPeerId);
         // The broadcast update is handled by the main 'disconnect' event
@@ -414,7 +445,123 @@ export const initMediasoup = async (io: any) => {
         }
       });
       //
+      socket.on("organizer:mute-all", () => {
+        const auth = isOrganizer(socket.id);
+        if (!auth) return;
 
+        const { mainRoom, peer } = auth; // 👇 THE FIX: Get the name from the peer, not the router ID
+        const mainRoomName = peer.roomName.split("-breakout-")[0];
+
+        console.log(`Organizer ${peer.user.name} is muting all.`);
+        let someoneWasMuted = false;
+        Object.values(peers).forEach((p) => {
+          // 👇 This check will now work correctly
+          if (
+            p.roomName.startsWith(mainRoomName) &&
+            p.socket.id !== socket.id
+          ) {
+            // Use your helper function!
+            const result = handleMutePeer(socket.id, p.socket.id);
+            if (result.success) {
+              someoneWasMuted = true;
+            }
+          }
+        }); // If we successfully muted anyone, broadcast the new state
+
+        if (someoneWasMuted) {
+          // Broadcast the new state to everyone
+          const allRooms = [mainRoomName, ...(mainRoom.breakoutRooms ?? [])];
+          allRooms.forEach((roomName) => {
+            const participantList = getParticipantListForRoom(roomName);
+            if (participantList.length > 0) {
+              connections
+                .to(roomName)
+                .emit("room-participants", participantList);
+            }
+          });
+          broadcastBreakoutState(mainRoomName);
+        }
+      });
+
+      socket.on("organizer:transfer-role", ({ targetUserId }) => {
+        const auth = isOrganizer(socket.id);
+        if (!auth) return;
+
+        const { mainRoom, peer } = auth;
+        const mainRoomName = peer.roomName.split("-breakout-")[0];
+        const targetPeer = Object.values(peers).find(
+          (p) =>
+            p.user.id === targetUserId && p.roomName.startsWith(mainRoomName)
+        );
+
+        if (!targetPeer || !targetPeer.roomName.startsWith(mainRoomName)) {
+          console.warn("Target peer not found in the same meeting.");
+          return;
+        }
+
+        console.log(`Transferring role to ${targetPeer.user.name}`);
+        mainRoom.organizerId = targetPeer.user.id;
+        broadcastBreakoutState(mainRoomName);
+        const allRooms = [mainRoomName, ...(mainRoom.breakoutRooms ?? [])];
+        allRooms.forEach((roomName) => {
+          const participantList = getParticipantListForRoom(roomName);
+          connections.to(roomName).emit("room-participants", participantList);
+        });
+      });
+      //
+      socket.on("peer:send-public-message", ({ text }: { text: string }) => {
+        const peer = peers[socket.id];
+        if (!peer) return;
+        const { roomName, user } = peer;
+        if (!rooms[roomName]) return;
+
+        const message = {
+          id: randomUUID(),
+          senderId: user.id, // ✅ Add senderId
+          senderName: user.name,
+          text: text,
+        };
+
+        console.log(`Broadcasting public message to room ${roomName}`);
+        connections.to(roomName).emit("room:new-public-message", message);
+      });
+
+      // ✅ Added this
+      socket.on("peer:send-private-message", ({ targetUserId, text }) => {
+        const senderPeer = peers[socket.id];
+        if (!senderPeer) return;
+
+        const message = {
+          id: randomUUID(),
+          senderId: senderPeer.user.id,
+          senderName: senderPeer.user.name,
+          text: text,
+        };
+
+        // Find the target peer by looping through peers and checking the user.id
+        const targetPeer = Object.values(peers).find(
+          (p) => p.user.id === targetUserId
+        );
+
+        if (targetPeer) {
+          const targetSocketId = targetPeer.socket.id; // Get their actual socket.id
+
+          // Send to receiver (they get the message "from" the sender)
+          connections.to(targetSocketId).emit("room:new-private-message", {
+            message,
+          });
+
+          // Send back to sender (we add targetUserId so they know where to store it)
+          socket.emit("room:new-private-message", {
+            message,
+            targetUserId: targetUserId,
+          });
+        } else {
+          console.warn(
+            `Could not find target user ${targetUserId} to send private message.`
+          );
+        }
+      });
       // ///brakout logic////
 
       //
@@ -431,13 +578,14 @@ export const initMediasoup = async (io: any) => {
       const getParticipantListForRoom = (roomName: string) => {
         const room = rooms[roomName];
         if (!room) return [];
+        const mainRoomName = roomName.split("-breakout-")[0];
+        const mainRoom = rooms[mainRoomName];
+
         return Array.from(room.peers)
           .map((id) => {
             const peerData = peers[id];
             if (!peerData) return null;
-            const isPeerOrganizer =
-              peerData.user.role === "Admin" ||
-              peerData.user.role === "Manager";
+            const isPeerOrganizer = peerData.user.id === mainRoom?.organizerId;
             return {
               id,
               userId: peerData.user.id,
@@ -485,6 +633,10 @@ export const initMediasoup = async (io: any) => {
           rtpCapabilities: router.rtpCapabilities,
         });
 
+        // const mainRoomName = oldRoomName.split("-breakout-")[0];
+        // if (rooms[mainRoomName]) {
+        //   broadcastBreakoutState(mainRoomName); // This sends the updated list to everyone
+        // }
         const oldRoomList = getParticipantListForRoom(oldRoomName);
         connections.to(oldRoomName).emit("room-participants", oldRoomList);
 
@@ -496,15 +648,7 @@ export const initMediasoup = async (io: any) => {
       socket.on(
         "organizer:createBreakoutRooms",
         async ({ roomName, numRooms }) => {
-          const userPeer = peers[socket.id];
-
-          if (
-            !userPeer ||
-            (userPeer.user.role !== "Admin" && userPeer.user.role !== "Manager")
-          ) {
-            console.warn("A non-organizer tried to perform an action.");
-            return; // Stop non-organizers
-          }
+          if (!isOrganizer(socket.id)) return;
           const mainRoom = rooms[roomName];
           if (!mainRoom) {
             console.error(
@@ -514,6 +658,7 @@ export const initMediasoup = async (io: any) => {
           }
           mainRoom.breakoutRooms = [];
           mainRoom.assignments = new Map();
+          console.log("new assign", mainRoom.assignments);
 
           for (let i = 0; i < numRooms; i++) {
             const breakoutRoomName = `${roomName}-breakout-${i + 1}`;
@@ -530,44 +675,40 @@ export const initMediasoup = async (io: any) => {
       );
 
       socket.on("organizer:assignPeerToRoom", ({ peerId, targetRoomName }) => {
-        const organizer = peers[socket.id];
-        // const peerToAssign = peers[peerId];
-        if (
-          !organizer ||
-          (organizer.user.role !== "Admin" && organizer.user.role !== "Manager")
-        ) {
-          return;
-        }
+        const peer = peers[socket.id];
+        if (!isOrganizer(socket.id)) return;
 
-        const mainRoomName = organizer.roomName.split("-breakout-")[0];
+        const mainRoomName = peer.roomName.split("-breakout-")[0];
         const mainRoom = rooms[mainRoomName];
+        const peerToAssign = peers[peerId];
+        if (!peerToAssign) return;
+        const persistentUserId = String(peerToAssign.user.id);
 
         if (mainRoom?.assignments) {
-          mainRoom.assignments.set(peerId, targetRoomName);
+          mainRoom.assignments.set(persistentUserId, targetRoomName);
           broadcastBreakoutState(mainRoomName);
+          console.log("assignpeer", mainRoom.assignments);
         }
       });
 
       socket.on("organizer:startBreakouts", ({ mainRoomName }) => {
         const mainRoom = rooms[mainRoomName];
         if (!mainRoom || !mainRoom.assignments) return;
-        const userPeer = peers[socket.id];
-        const isOrganizer =
-          userPeer &&
-          (userPeer.user.role === "Admin" || userPeer.user.role === "Manager");
-        if (!isOrganizer || !mainRoom) {
-          return;
-        }
-        if (!mainRoom.assignments) return;
+        if (!isOrganizer(socket.id) || !mainRoom) return;
 
-        for (const [peerId, targetRoomName] of mainRoom.assignments.entries()) {
-          const peerToMove = peers[peerId];
+        const findPeerByUserId = (userId: string): PeerState | undefined => {
+          return Object.values(peers).find((p) => p.user.id === userId);
+        };
+
+        for (const [userId, targetRoomName] of mainRoom.assignments.entries()) {
+          const peerToMove = findPeerByUserId(userId);
           if (peerToMove && peerToMove.roomName !== targetRoomName) {
             peerToMove.socket.emit("server:prepare-to-move", {
               newRoomName: targetRoomName,
             });
           }
         }
+        console.log("start breakoutroom", mainRoom.assignments);
       });
       //
       socket.on("peer:exitBreakoutRoom", () => {
@@ -584,8 +725,9 @@ export const initMediasoup = async (io: any) => {
         }
 
         if (mainRoom.assignments) {
-          mainRoom.assignments.set(socket.id, mainRoomName);
+          mainRoom.assignments.set(String(peer.user.id), mainRoomName);
           broadcastBreakoutState(mainRoomName);
+          console.log("peerexitbrekoutroom", mainRoom.assignments);
         }
 
         //  Tell the client to execute the move
@@ -599,14 +741,7 @@ export const initMediasoup = async (io: any) => {
       //
       socket.on("organizer:endBreakouts", ({ mainRoomName }) => {
         const mainRoom = rooms[mainRoomName];
-        const userPeer = peers[socket.id];
-        const isOrganizer =
-          userPeer &&
-          (userPeer.user.role === "Admin" || userPeer.user.role === "Manager");
-
-        if (!isOrganizer || !mainRoom) {
-          return;
-        }
+        if (!isOrganizer(socket.id)) return;
 
         if (!mainRoom.breakoutRooms) return;
         mainRoom.breakoutRooms.forEach((breakoutRoomName) => {
@@ -626,9 +761,51 @@ export const initMediasoup = async (io: any) => {
         mainRoom.breakoutRooms = [];
         mainRoom.assignments = new Map();
         broadcastBreakoutState(mainRoomName);
+        console.log("endbrekoutroom", mainRoom.assignments);
       });
       //
-     
+      socket.on("organizer:end-meeting", ({ mainRoomName }) => {
+        // 1. Security Check: Is this peer an organizer?
+        const auth = isOrganizer(socket.id);
+        if (!auth) {
+          console.warn(`Non-organizer ${socket.id} tried to end meeting.`);
+          return;
+        }
+
+        // 2. Check if the main room from the request matches the organizer's room
+        const organizerMainRoom = auth.peer.roomName.split("-breakout-")[0];
+        if (organizerMainRoom !== mainRoomName) {
+          console.warn(
+            `Organizer ${socket.id} tried to end a different meeting.`
+          );
+          return;
+        }
+
+        console.log(
+          `Organizer ${auth.peer.user.name} is ending meeting: ${mainRoomName}`
+        );
+
+        // 3. Kick every peer in that meeting (main room + all breakouts)
+        Object.values(peers).forEach((peer) => {
+          if (
+            peer.roomName.startsWith(mainRoomName) && // Is in the same meeting
+            peer.socket.id !== socket.id // DON'T kick the organizer
+          ) {
+            console.log(`Ending meeting: Kicking peer ${peer.user.name}`);
+            // This event is already handled by your client to trigger cleanup
+            peer.socket.emit("server:you-are-kicked");
+          }
+        });
+
+        // 4. (Optional) Clean up the rooms from memory
+        // The disconnect handler will eventually clean them, but this is faster.
+        if (rooms[mainRoomName] && rooms[mainRoomName].breakoutRooms) {
+          rooms[mainRoomName].breakoutRooms.forEach((brName) => {
+            delete rooms[brName];
+          });
+        }
+        delete rooms[mainRoomName];
+      });
       //
 
       const cleanupPeer = (socketId: string) => {
