@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  # --- SERVICE 1: THE FRONTEND (Next.js) ---
+  client:
+    build: .
+    container_name: dhisai-client
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_MEDIASOUP_CLIENT_URL=http://192.168.1.38:8000
+    # Command to start Next.js
+    command: npm run start
+
+  # --- SERVICE 2: THE BACKEND (Mediasoup) ---
+  server:
+    build: .
+    container_name: dhisai-server
+    restart: always
+    ports:
+      # 1. The Signaling Port (Socket.io)
+      - "8000:8000"
+      
+      # 2. THE MEDIA PORTS (Must match your code change in Step 1)
+      # UDP is critical for video!
+      - "40000-40200:40000-40200/udp"
+      - "40000-40200:40000-40200/tcp"
+    env_file: .env.production
+    # Command to start the server (using esbuild-register as you do in dev)
+    command: node -r esbuild-register server/index.ts

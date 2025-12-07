@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import mediaSoupClient from "../../app/mediaSoup/mediaSoup"; // Your existing mediaSoupClient
+import mediaSoupClient from "../../app/mediaSoup/mediaSoup";
 import { Socket } from "socket.io-client";
 
 type MediaSoupClientInstance = ReturnType<typeof mediaSoupClient>;
@@ -20,14 +20,18 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
   const clientRef = useRef<MediaSoupClientInstance | null>(null);
-  // ===  ALL STATE LIVES HERE ===
-  // Peer State
+
+  // === STATE ===
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  // ✅ NEW: Ref to track stream without triggering re-renders in callbacks
+  const localStreamRef = useRef<MediaStream | null>(null);
+
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(
     new Map()
   );
   const [isKicked, setIsKicked] = useState(false);
   const [currentRoomName, setCurrentRoomName] = useState<string>("");
+
   // Chat State
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [currentChatTarget, setCurrentChatTarget] =
@@ -37,67 +41,64 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
     Map<string, Message[]>
   >(new Map());
   const [unreadMessages, setUnreadMessages] = useState(
-    // ✅ Add unread state
     new Map<string, boolean>()
   );
+
   // Participant State
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [mainRoomParticipants, setMainRoomParticipants] = useState<
     Participant[]
   >([]);
   const [isOrganizer, setIsOrganizer] = useState(false);
-  //  Breakout Room State
+
+  // Breakout State
   const [breakoutRooms, setBreakoutRooms] = useState<string[]>([]);
   const [assignments, setAssignments] = useState<Map<string, string>>(
     new Map()
   );
-  // internal helpers
+
   const isMovingRef = useRef(false);
   const localTracksStore = useRef(new Set<MediaStreamTrack>());
   const socketRef = useRef<Socket | null>(null);
-  //
   const localUserIdRef = useRef<string | null>(null);
   const localUserNameRef = useRef<string | null>(null);
-  //  ========================================
-  // ===  ALL CALLBACKS LIVE HERE ===
-  const handleForceMute = useCallback(async (): Promise<void> => {
-    const client = clientRef.current;
-    if (!client) return;
 
+  // ✅ Sync Ref with State
+  useEffect(() => {
+    localStreamRef.current = localStream;
+  }, [localStream]);
+
+  // === CALLBACKS ===
+
+  const handleForceMute = useCallback(async (): Promise<void> => {
     console.log("Context: Handling force mute");
     try {
       setLocalStream((currentStream) => {
         if (!currentStream) return null;
-
         const audioTrack = currentStream.getAudioTracks()[0];
         if (audioTrack) {
           audioTrack.stop();
           localTracksStore.current.delete(audioTrack);
         }
-        const videoTracks = currentStream.getVideoTracks();
-        return new MediaStream(videoTracks);
+        // Create new stream to trigger state update
+        return new MediaStream(currentStream.getVideoTracks());
       });
     } catch (error) {
       console.error("Failed to handle force mute:", error);
     }
-  }, []); // Empty dependency array makes this function stable
+  }, []);
 
   const handleForceStopVideo = useCallback(async (): Promise<void> => {
-    const client = clientRef.current;
-    if (!client) return;
-
     console.log("Context: Handling force stop video");
     try {
       setLocalStream((currentStream) => {
         if (!currentStream) return null;
-
         const videoTrack = currentStream.getVideoTracks()[0];
         if (videoTrack) {
           videoTrack.stop();
           localTracksStore.current.delete(videoTrack);
         }
-        const audioTracks = currentStream.getAudioTracks();
-        return new MediaStream(audioTracks);
+        return new MediaStream(currentStream.getAudioTracks());
       });
     } catch (error) {
       console.error("Failed to handle force stop video:", error);
@@ -106,6 +107,7 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const initialize = useCallback(
     (roomName: string, participantId: string, userName: string) => {
+      // Cleanup previous instance if exists
       if (clientRef.current) {
         clientRef.current.cleanup();
         clientRef.current = null;
@@ -117,7 +119,7 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
 
       const client = mediaSoupClient(roomName, participantId, userName, {
         onLocalStream: (stream) => {
-          setLocalStream(stream);
+          setLocalStream(stream); // This triggers the loop in the old code
         },
         onRemoteStream: (peerId, stream, kind) => {
           setRemoteStreams((prev) => {
@@ -125,6 +127,7 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
             const existingStream = newStreams.get(peerId);
             const newTrack = stream.getTracks()[0];
             if (!newTrack) return newStreams;
+
             if (existingStream) {
               const oldTracks = existingStream
                 .getTracks()
@@ -172,9 +175,10 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
           setCurrentRoomName(newRoomName);
           setRemoteStreams(new Map());
 
+          // ✅ FIXED: Use ref here instead of state dependency
           clientRef.current?.reinitialize(
             rtpCapabilities,
-            localStream || new MediaStream()
+            localStreamRef.current || new MediaStream()
           );
         },
         onBreakoutState: (data) => {
@@ -200,14 +204,11 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
         onForceMute: handleForceMute,
         onForceStopVideo: handleForceStopVideo,
         onKicked: () => {
-          setIsKicked(true); // Set the state flag
+          setIsKicked(true);
         },
         onNewPublicMessage: (message: Message) => {
           setPublicMessages((prev) => [...prev, message]);
-
-          // ✅ Use ref for the check
           if (message.senderId !== localUserIdRef.current) {
-            console.log("Setting PUBLIC notification");
             setIsChatOpen((currentIsOpen) => {
               setCurrentChatTarget((currentTarget) => {
                 if (!currentIsOpen || currentTarget !== null) {
@@ -221,7 +222,6 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
             });
           }
         },
-
         onNewPrivateMessage: (message: Message, otherUserId: string) => {
           setPrivateMessages((prevMap) => {
             const newMap = new Map(prevMap);
@@ -229,10 +229,7 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
             newMap.set(otherUserId, [...oldMessages, message]);
             return newMap;
           });
-
-          // ✅ Use ref for the check
           if (message.senderId !== localUserIdRef.current) {
-            console.log("Setting PRIVATE notification for:", otherUserId);
             setIsChatOpen((currentIsOpen) => {
               setCurrentChatTarget((currentTarget) => {
                 if (!currentIsOpen || currentTarget?.userId !== otherUserId) {
@@ -247,9 +244,11 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
           }
         },
       });
+
       clientRef.current = client;
       socketRef.current = client.socket;
     },
+    // ✅ FIXED: Removed localStream from dependency array
     [handleForceMute, handleForceStopVideo]
   );
 
@@ -265,7 +264,6 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
     socketRef.current = null;
     setLocalStream(null);
     setRemoteStreams(new Map());
-
     setParticipants([]);
     setBreakoutRooms([]);
     setAssignments(new Map());
@@ -276,8 +274,9 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
     return () => {
       cleanup();
     };
-  }, []);
+  }, [cleanup]);
 
+  // ... (Toggle functions use state, which is fine because they don't trigger re-initialization)
   const toggleVideo = useCallback(async (): Promise<void> => {
     const client = clientRef.current;
     if (!client || !localStream) return;
@@ -300,22 +299,10 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
           const currentTracks = localStream.getTracks();
           const newStream = new MediaStream([...currentTracks, newTrack]);
           setLocalStream(newStream);
-          console.log(
-            "Resumed video track:",
-            newTrack,
-            "New stream tracks:",
-            newStream.getTracks()
-          );
-        } else {
-          throw new Error("Failed to resume video track");
         }
       }
     } catch (error) {
       console.error("Failed to toggle video:", error);
-      alert(
-        "Failed to toggle video: " +
-          (error instanceof Error ? error.message : String(error))
-      );
     }
   }, [localStream]);
 
@@ -334,8 +321,6 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
           const currentTracks = localStream.getTracks();
           const newStream = new MediaStream([...currentTracks, newTrack]);
           setLocalStream(newStream);
-        } else {
-          throw new Error("Failed to resume audio track");
         }
       } else {
         client.stopAudioProducer();
@@ -349,17 +334,12 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     } catch (error) {
       console.error("Failed to toggle mute:", error);
-      alert(
-        "Failed to toggle mute: " +
-          (error instanceof Error ? error.message : String(error))
-      );
     }
   }, [localStream]);
 
   const toggleScreenShare = useCallback(async (): Promise<void> => {
     const client = clientRef.current;
     if (!client || !localStream) return;
-
     try {
       const isScreenSharing = !!localStream
         .getVideoTracks()
@@ -385,36 +365,29 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     } catch (error) {
       console.error("Failed to toggle screen share:", error);
-      alert(
-        "Failed to toggle screen share: " +
-          (error instanceof Error ? error.message : String(error))
-      );
     }
   }, [localStream]);
+
   const sendPublicMessage = useCallback((text: string) => {
-    // ONLY send to the server.
-    // The server will echo it back, and onNewPublicMessage will handle it.
     clientRef.current?.sendPublicMessage(text);
-  }, []); // ✅ No dependencies
+  }, []);
 
   const sendPrivateMessage = useCallback(
     (text: string, targetUserId: string) => {
-      // ONLY send to the server.
-      // The server will echo it back, and onNewPrivateMessage will handle it.
       clientRef.current?.sendPrivateMessage(text, targetUserId);
     },
     []
   );
+
   const clearUnreadMessages = useCallback((targetId: string) => {
     setUnreadMessages((prev) => {
-      if (!prev.has(targetId)) return prev; // No change
+      if (!prev.has(targetId)) return prev;
       const newMap = new Map(prev);
       newMap.delete(targetId);
       return newMap;
     });
   }, []);
 
-  // ===  MEMOIZED "SLICES" ===
   const peerValue: PeerContextType = useMemo(
     () => ({
       client: clientRef.current,
@@ -443,9 +416,11 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
       toggleVideo,
       toggleMute,
       toggleScreenShare,
+      initialize,
+      cleanup,
     ]
   );
-  //
+
   const participantValue: ParticipantContextType = useMemo(
     () => ({
       participants,
@@ -460,7 +435,7 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
     }),
     [participants, isOrganizer]
   );
-  //
+
   const chatValue: ChatContextType = useMemo(
     () => ({
       isChatOpen,
@@ -476,7 +451,9 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
     }),
     [
       isChatOpen,
+      setIsChatOpen,
       currentChatTarget,
+      setCurrentChatTarget,
       publicMessages,
       privateMessages,
       sendPublicMessage,
@@ -485,7 +462,7 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
       clearUnreadMessages,
     ]
   );
-  //
+
   const breakoutValue: BreakoutRoomContextType = useMemo(
     () => ({
       breakoutRooms,
@@ -501,7 +478,7 @@ export const MediaSoupProvider: React.FC<{ children: React.ReactNode }> = ({
     }),
     [breakoutRooms, assignments, mainRoomParticipants]
   );
-  //
+
   return (
     <PeerContext.Provider value={peerValue}>
       <ParticipantContext.Provider value={participantValue}>

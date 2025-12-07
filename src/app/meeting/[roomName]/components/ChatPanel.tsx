@@ -1,5 +1,3 @@
-// components/meeting/[roomName]/components/ChatPanel.tsx
-
 "use client";
 
 import {
@@ -8,16 +6,15 @@ import {
   SheetHeader,
   SheetTitle,
   SheetTrigger,
-  SheetDescription,
 } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { MessageSquare, Send, ArrowLeft, Users } from "lucide-react";
-import React, { useState, useEffect, useRef } from "react";
+import { MessageSquare, Send, Users } from "lucide-react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useAuth } from "@/lib/provider/authprovider";
-import { useChat, Message } from "@/lib/provider/ChatContext";
+import { useChat } from "@/lib/provider/ChatContext";
 import { useParticipant, Participant } from "@/lib/provider/ParticipantContext"; // ✅ 1. Import participants
 import { cn } from "@/lib/utils"; // Assuming you have cn from shadcn
 
@@ -44,9 +41,12 @@ export const ChatPanel = () => {
   // --- Data Preparation ---
   const isPublic = currentChatTarget === null;
   const currentChatId = isPublic ? "public" : currentChatTarget.userId;
-  const messages = isPublic
-    ? publicMessages
-    : privateMessages.get(currentChatId) || [];
+ 
+ const messages = useMemo(() => {
+    return isPublic
+      ? publicMessages
+      : privateMessages.get(currentChatId) || [];
+  }, [isPublic, publicMessages, privateMessages, currentChatId]);
 
   // ✅ Get a list of all participants you have a private chat with
   const privateChatUserIds = Array.from(privateMessages.keys());

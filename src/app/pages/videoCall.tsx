@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, useMemo, use } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react"; // Removed 'use'
 import { useParams, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/provider/authprovider";
 import { ControlBar } from "../meeting/[roomName]/components/ControlBar";
@@ -59,7 +59,7 @@ export default function VideoCall() {
   const roomName = params.roomName as string;
   const participantId = user?.id;
   const {
-    client,
+    // client, // Fixed: Removed unused variable
     currentRoomName,
     localStream,
     remoteStreams,
@@ -69,7 +69,7 @@ export default function VideoCall() {
   const { participants } = useParticipant();
   const [presenterId, setPresenterId] = useState<string>("local");
   const presenterVideoRef = useRef<HTMLVideoElement>(null);
-  //
+  
   useEffect(() => {
     if (!roomName || !user || !participantId || !user.name) return;
     initialize(roomName, participantId, user.name);
@@ -86,7 +86,7 @@ export default function VideoCall() {
     setTimeout(() => {
       router.push("/");
     }, 100);
-  }, [ router]);
+  }, [router]);
 
   useEffect(() => {
     if (isKicked) {

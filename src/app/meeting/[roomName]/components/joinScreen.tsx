@@ -1,12 +1,9 @@
-// components/MeetingJoinScreen.tsx
-
 "use client";
 import { useAuth } from "@/lib/provider/authprovider";
 import { useState, useEffect, useRef } from "react";
-import { useRouter, useParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { Mic, MicOff, Video, VideoOff } from "lucide-react";
 
-// Define the props type for the MediaButton component
 interface MediaButtonProps {
   onClick: () => void;
   isEnabled: boolean;
@@ -14,7 +11,6 @@ interface MediaButtonProps {
   disabledIcon: React.ReactNode;
 }
 
-// This is a simple reusable button component for the media controls
 const MediaButton: React.FC<MediaButtonProps> = ({
   onClick,
   isEnabled,
@@ -40,17 +36,18 @@ export default function MeetingJoinScreen({
 }) {
   const { user } = useAuth();
   const router = useRouter();
-  const params = useParams();
+  // Fixed: unused roomName
+  // const params = useParams(); 
+  // const roomName = params.roomName as string;
+
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
-  const [participantName, setParticipantName] = useState("");
+  
+  // Fixed: Removed unused participantName state
 
-  const roomName = params.roomName as string;
-
-  // 1. Get user media for the preview when the component loads
   useEffect(() => {
     const getMedia = async () => {
       try {
@@ -74,11 +71,19 @@ export default function MeetingJoinScreen({
 
     // Cleanup: stop media tracks when the component unmounts
     return () => {
-      localStream?.getTracks().forEach((track) => track.stop());
+      // Note: We check localStream inside the cleanup in the next useEffect or here if we want
+      // But the linter warned about missing dependency.
     };
-  }, []); // The empty dependency array ensures this runs only once
+  }, []);
 
-  // 2. Functions to toggle audio and video
+  // Fixed: Added dependency array or moved cleanup logic to a separate effect that depends on localStream
+  useEffect(() => {
+      return () => {
+          localStream?.getTracks().forEach((track) => track.stop());
+      }
+  }, [localStream]);
+
+
   const toggleAudio = () => {
     if (localStream) {
       localStream.getAudioTracks().forEach((track) => {
@@ -97,18 +102,14 @@ export default function MeetingJoinScreen({
     }
   };
 
-  // 3. Handle joining the meeting
   const handleJoinMeeting = () => {
-    // Stop the preview stream before navigating
     localStream?.getTracks().forEach((track) => track.stop());
-
     onJoinSuccess();
   };
 
   return (
     <div className="bg-gray-900 text-white min-h-screen flex flex-col items-center justify-center font-sans p-4">
       <main className="grid grid-cols-1 md:grid-cols-2 gap-8 md:gap-16 items-center w-full max-w-6xl">
-        {/* Left Side: Video Preview */}
         <div className="w-full max-w-2xl aspect-video bg-black rounded-lg overflow-hidden relative shadow-2xl">
           <video
             ref={videoRef}
@@ -133,7 +134,6 @@ export default function MeetingJoinScreen({
           </div>
         </div>
 
-        {/* Right Side: Join Panel */}
         <div className="flex flex-col gap-4 items-center justify-center text-center w-full max-w-sm">
           <h1 className="text-3xl font-bold">Ready to join?</h1>
           <p className="text-gray-400"> your name: {user?.name}</p>

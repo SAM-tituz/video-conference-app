@@ -6,7 +6,13 @@ type Transport = mediasoupClient.types.Transport;
 type Producer = mediasoupClient.types.Producer;
 type Consumer = mediasoupClient.types.Consumer;
 type Device = mediasoupClient.types.Device;
-
+type rtpCapabilities = mediasoupClient.types.RtpCapabilities;
+type TransportOptions = mediasoupClient.types.TransportOptions;
+type ConsumerOptions = mediasoupClient.types.ConsumerOptions;
+type param = {
+  encodings?: { rid?: string; maxBitrate?: number }[];
+  codecOptions?: { videoGoogleStartBitrate?: number };
+};
 import { Participant } from "@/lib/provider/ParticipantContext";
 import { Message } from "@/lib/provider/ChatContext";
 
@@ -27,7 +33,7 @@ type MediaSoupClientOptions = {
   }) => void;
   onMoveConfirmed: (data: {
     newRoomName: string;
-    rtpCapabilities: any;
+    rtpCapabilities: rtpCapabilities;
   }) => void;
   onForceMute: () => void;
   onForceStopVideo: () => void;
@@ -35,8 +41,6 @@ type MediaSoupClientOptions = {
   onNewPublicMessage: (message: Message) => void; // ✅ Renamed
   onNewPrivateMessage: (message: Message, otherUserId: string) => void;
 };
-
-let screenProducer: Producer | null = null;
 
 export default function mediaSoupClient(
   roomName: string,
@@ -55,8 +59,8 @@ export default function mediaSoupClient(
   let recvTransport: Transport | null = null;
   let audioProducer: Producer | null = null;
   let videoProducer: Producer | null = null;
-  let audioParams: { track?: MediaStreamTrack } = {};
-  let videoParams: { track?: MediaStreamTrack; params?: any } = {
+  const audioParams: { track?: MediaStreamTrack } = {};
+  const videoParams: { track?: MediaStreamTrack; params?: param } = {
     params: {
       encodings: [
         { rid: "r0", maxBitrate: 100000 },
@@ -91,7 +95,7 @@ export default function mediaSoupClient(
   };
 
   const reinitialize = async (
-    rtpCapabilities: any,
+    rtpCapabilities: rtpCapabilities,
     newLocalStream: MediaStream
   ) => {
     console.log("Re-initializing media for new room.");
@@ -214,8 +218,8 @@ export default function mediaSoupClient(
       socket.emit(
         "createWebRtcTransport",
         { consumer: false },
-        (params: any) => {
-          if (!device || params.error) return;
+        (params: TransportOptions | { error: unknown }) => {
+          if (!device || "error" in params) return;
           sendTransport = device.createSendTransport(params);
           sendTransport.on("connect", ({ dtlsParameters }, callback) => {
             socket.emit("transport-connect", {
@@ -246,8 +250,8 @@ export default function mediaSoupClient(
       socket.emit(
         "createWebRtcTransport",
         { consumer: true },
-        (params: any) => {
-          if (!device || params.error) return;
+        (params: TransportOptions | { error: unknown }) => {
+          if (!device || "error" in params) return;
           recvTransport = device.createRecvTransport(params);
           recvTransport.on("connect", ({ dtlsParameters }, callback) => {
             socket.emit("transport-connect", {
@@ -287,8 +291,8 @@ export default function mediaSoupClient(
         remoteProducerId: producerId,
         serverConsumerTransportId: recvTransport.id,
       },
-      async (params: any) => {
-        if (params.error || !recvTransport) return;
+      async (params: ConsumerOptions | { error: unknown }) => {
+        if (!recvTransport || "error" in params) return;
         const consumer = await recvTransport.consume(params);
         consumers.set(producerId, consumer);
         producerToPeerMap.set(producerId, peerId);
@@ -376,7 +380,7 @@ export default function mediaSoupClient(
   };
 
   const startScreenShare = async () => {
-    if (!sendTransport || screenProducer) return null; // Prevent multiple screen shares
+    if (!sendTransport) return null; // Prevent multiple screen shares
     console.log("Starting screen share");
     if (videoProducer) {
       await stopVideoProducer();
@@ -475,7 +479,7 @@ export default function mediaSoupClient(
     // The VideoCall component should handle redirecting on cleanup/context change
   });
 
-socket.on("room:new-public-message", (message: Message) => {
+  socket.on("room:new-public-message", (message: Message) => {
     options.onNewPublicMessage(message);
   });
 
@@ -536,10 +540,10 @@ socket.on("room:new-public-message", (message: Message) => {
     remoteMutePeer,
     remoteStopVideoPeer,
     kickPeer,
-    sendPublicMessage, 
+    sendPublicMessage,
     sendPrivateMessage,
     endMeeting,
-    muteAllPeers, 
+    muteAllPeers,
     transferRole,
   };
 }
