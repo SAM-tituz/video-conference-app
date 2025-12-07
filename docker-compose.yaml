@@ -4,7 +4,7 @@ services:
   # --- SERVICE 1: THE FRONTEND (Next.js) ---
   client:
     build: .
-    container_name: dhisai-client
+    container_name: app-client
     restart: always
     ports:
       - "3000:3000"
@@ -16,7 +16,7 @@ services:
   # --- SERVICE 2: THE BACKEND (Mediasoup) ---
   server:
     build: .
-    container_name: dhisai-server
+    container_name: app-server
     restart: always
     ports:
       # 1. The Signaling Port (Socket.io)
